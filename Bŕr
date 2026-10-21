@@ -1,247 +1,195 @@
--- bypass anticheat script
-local str = game:HttpGet("https://rawscripts.net/raw/Steal-a-Brainrot-Anti-Kick-Bypass-41960")
-pcall(function() loadstring(str)() end)
+-- Delta Mobile-Compatible Script (Standalone UI)
+local localplr = game:Players.LocalPlayer
+local PlayerGui = localplr:WaitForChild("PlayerGui")
 
-local localplr = game.Players.LocalPlayer
-getgenv().deletewhendespawned = true
-local on = true
-local lib = loadstring(game:HttpGet("https://rawscripts.net/raw/Universal-Script-Lib-18698"))()
-lib.makeLib("Steal a Brainrot (2AreYouMental110, Too overpowered?)")
+-- Clean up existing UI if re-executed
+if PlayerGui:FindFirstChild("StealBrainrotGUI") then
+    PlayerGui.StealBrainrotGUI:Destroy()
+end
 
-local tableofconnections = {}
-local posgoto = nil
-local sbase = false
-local sbox = Instance.new("SelectionBox")
-local gotobase = nil
-sbox.Parent = game.CoreGui
-local lastcfr = nil
-local gotoplace = nil
-local main = lib.maketab("Main")
+-- Create Main GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "StealBrainrotGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 280, 0, 360)
+MainFrame.Position = UDim2.new(0.5, -140, 0.3, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 10)
+Corner.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 35)
+Title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+Title.Text = "Steal a Brainrot (Delta Fix)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 14
+Title.Font = Enum.Font.SourceSansBold
+Title.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 10)
+TitleCorner.Parent = Title
+
+local Container = Instance.new("ScrollingFrame")
+Container.Size = UDim2.new(1, -20, 1, -45)
+Container.Position = UDim2.new(0, 10, 0, 40)
+Container.BackgroundTransparency = 1
+Container.CanvasSize = UDim2.new(0, 0, 0, 320)
+Container.ScrollBarThickness = 4
+Container.Parent = MainFrame
+
+local UIList = Instance.new("UIListLayout")
+UIList.Padding = UDim.new(0, 8)
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+UIList.Parent = Container
+
+-- Helper function to create toggles
+local function createToggle(name, default, callback)
+    local state = default
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 35)
+    btn.BackgroundColor3 = state and Color3.fromRGB(50, 150, 80) or Color3.fromRGB(60, 60, 70)
+    btn.Text = name .. ": " .. (state and "ON" or "OFF")
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 12
+    btn.Font = Enum.Font.SourceSans
+    btn.Parent = Container
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and Color3.fromRGB(50, 150, 80) or Color3.fromRGB(60, 60, 70)
+        btn.Text = name .. ": " .. (state and "ON" or "OFF")
+        pcall(callback, state)
+    end)
+    return btn
+end
+
+-- Feature Variables
 local autosteal = false
+local antiragdoll = false
+local ipp = false
+local jp = false
+local sbase = false
+local gtb = false
+local gotobase = nil
 
-lib.makelabel("This game has VERY good anticheat! However, you can just click on the base you wanna go to (toggle select base) and then click goto base!", main)
-lib.makelabel("Make sure to turn on Auto Steal before stealing their pets!", main)
+local sbox = Instance.new("SelectionBox")
+sbox.Parent = game.CoreGui
+sbox.Transparency = 1
 
-lib.maketoggle("Auto Steal (turn on before stealing)", main, function(bool)
+-- 1. Auto Steal Toggle
+createToggle("Auto Steal", false, function(bool)
     autosteal = bool
 end)
 
-local pbt = false
-local donetools = {}
-lib.maketoggle("Spam Tools", main, function(bool)
-    pbt = bool
-end)
-
-local antiragdoll = false
-lib.maketoggle("Anti Ragdoll/Freeze", main, function(bool)
+-- 2. Anti Ragdoll/Freeze Toggle
+createToggle("Anti Ragdoll/Freeze", false, function(bool)
     antiragdoll = bool
 end)
 
-lib.makelabel("", main)
-
-table.insert(tableofconnections, workspace.ChildAdded:Connect(function(c)
-    if c:IsA("Model") and c:FindFirstChild("RootPart") and c.RootPart:FindFirstChildWhichIsA("WeldConstraint") and c.RootPart:FindFirstChildWhichIsA("WeldConstraint").Part0 == localplr.Character.HumanoidRootPart then
-        task.wait(2.5)
-        if c.Parent == workspace and autosteal then
-            if game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/StealService/DeliverySteal") then
-                game.ReplicatedStorage.Packages.Net["RE/StealService/DeliverySteal"]:FireServer()
-            elseif game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/3891348e-5b69-47f3-af95-20012defb3fe") then
-                game.ReplicatedStorage.Packages.Net["RE/3891348e-5b69-47f3-af95-20012defb3fe"]:FireServer("a708cd00-2836-4a0c-8b0a-59da79aaebea")
-            else
-                print("steal not found!")
-            end
-        end
-    end
-end))
-
-lib.maketoggle("Select Base", main, function(bool)
+-- 3. Select Base Toggle
+createToggle("Select Base", false, function(bool)
     sbase = bool
     sbox.Transparency = sbase and 0 or 1
 end)
 
-function tweentopos(tppos, nosub)
-    if not localplr.Character or not localplr.Character:FindFirstChild("HumanoidRootPart") then return 0, CFrame.new() end
-    local plrpos = localplr.Character.HumanoidRootPart.Position
-    if nosub == nil then
-        tppos = (tppos - Vector3.new(0, tppos.Y, 0)) - Vector3.new(0, plrpos.Y, 0)
-    end
-    local t = (tppos - plrpos).Magnitude / localplr.Character.Humanoid.WalkSpeed
-    local cfr = CFrame.new(tppos) * (localplr.Character.HumanoidRootPart.CFrame - plrpos)
-    game:GetService("TweenService"):Create(
-        localplr.Character.HumanoidRootPart,
-        TweenInfo.new(t, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, 0, false, 0),
-        {CFrame = cfr, Velocity = Vector3.new(0, 0, 0)}
-    ):Play()
-    return t, cfr
-end
-
-local gtb = false
-lib.maketoggle("Goto Base (waits for timer and walks in)", main, function(bool)
-    gtb = bool
-    if gtb and gotobase and gotobase:FindFirstChild("DeliveryHitbox") then
-        local w, c = tweentopos(gotobase.DeliveryHitbox.Position)
-        task.wait(w)
-        while gtb do
-            task.wait()
-            pcall(function()
-                local lb = gotobase.Purchases:GetChildren()[1].Main.BillboardGui.LockStudio
-                if lb and lb.Visible then
-                    local w = tweentopos(gotobase.Purchases:GetChildren()[1].Hitbox.Position, true)
-                    task.wait(w)
-                    return
-                elseif lb and not lb.Visible then
-                    localplr.Character.HumanoidRootPart.CFrame = c
-                end
-            end)
-        end
-    end
-end)
-
-local notusing = true
-lib.makebutton("Goto Base (OOF - OLD SERVERS)", main, function()
-    if gotobase and notusing then
-        notusing = false
-        pcall(function()
-            gotoplace = gotobase.AnimalPodiums["1"]:GetPivot() + Vector3.new(0, 3.5, 0)
-            localplr.Character.Humanoid.Health = -1
-            task.wait(2.5)
-            gotoplace = nil
-        end)
-        notusing = true
-    end
-end)
-
-lib.makelabel("", main)
-
-local ipp = false
-local pp = {}
-function dop(p)
-    pcall(function()
-        if p.Name:find("PromptAttachment") and p:FindFirstChild("ProximityPrompt") then
-            local c = p.ProximityPrompt
-            table.insert(pp, c)
-            if ipp then c.HoldDuration = 0 end
-            table.insert(tableofconnections, c:GetPropertyChangedSignal("HoldDuration"):Connect(function()
-                if c.HoldDuration ~= 0 and ipp then c.HoldDuration = 0 end
-            end))
-        end
-    end)
-end
-
-for i, v in pairs(workspace.Plots:GetChildren()) do
-    if v:FindFirstChild("AnimalPodiums") then
-        for _, pod in pairs(v.AnimalPodiums:GetChildren()) do dop(pod) end
-        table.insert(tableofconnections, v.AnimalPodiums.ChildAdded:Connect(dop))
-    end
-end
-
-lib.maketoggle("Instant Proximity Prompts", main, function(bool)
+-- 4. Instant Proximity Prompts
+createToggle("Instant Proximity Prompts", false, function(bool)
     ipp = bool
-    if ipp then
-        for _, v in pairs(pp) do pcall(function() v.HoldDuration = 0 end) end
+    if workspace:FindFirstChild("Plots") then
+        for _, v in pairs(workspace.Plots:GetDescendants()) do
+            if v:IsA("ProximityPrompt") then
+                v.HoldDuration = ipp and 0 or 1
+            end
+        end
     end
 end)
 
-lib.makelabel("", main)
-local jp = false
-lib.maketoggle("Gravity (better)", main, function(bool)
+-- 5. Low Gravity / High Jump
+createToggle("Gravity (Better Jump)", false, function(bool)
     jp = bool
     if localplr.Character and localplr.Character:FindFirstChild("Humanoid") then
         localplr.Character.Humanoid.UseJumpPower = true
-        if not jp then
+        if jp then
+            workspace.Gravity = 50
+            localplr.Character.Humanoid.JumpPower = 100
+        else
             workspace.Gravity = 196.2
             localplr.Character.Humanoid.JumpPower = 50
         end
     end
 end)
 
-local mouse = localplr:GetMouse()
-local loopclickpart = Instance.new("Part")
-loopclickpart.Anchored = true
-loopclickpart.CanCollide = false
-loopclickpart.Color = Color3.fromRGB(0, 255, 0)
-loopclickpart.Shape = Enum.PartType.Ball
-loopclickpart.Size = Vector3.new(2, 2, 2)
-loopclickpart.Transparency = 1
-loopclickpart.Material = Enum.Material.SmoothPlastic
-loopclickpart.Parent = workspace
-local loopclick = false
-
-lib.maketoggle("Select Click Position", main, function(bool)
-    loopclick = bool
+-- 6. Show Hitboxes
+createToggle("Show Hitboxes", false, function(bool)
+    if workspace:FindFirstChild("Plots") then
+        for _, v in pairs(workspace.Plots:GetChildren()) do
+            if v:FindFirstChild("InvisibleWalls") then
+                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
+                    wall.Transparency = bool and 0.5 or 1
+                end
+            end
+        end
+    end
 end)
 
-table.insert(tableofconnections, mouse.Button1Down:Connect(function()
-    if loopclick then
-        if mouse.Hit and localplr.Character and localplr.Character:FindFirstChild("HumanoidRootPart") then
-            local hit = CFrame.new(mouse.Hit.Position) + Vector3.new(0, localplr.Character.HumanoidRootPart.Size.Y / 1.5, 0)
-            loopclickpart.CFrame = hit
-            loopclickpart.Transparency = 0
-            posgoto = hit
+-- 7. Noclip Hitboxes
+createToggle("Noclip Hitboxes", false, function(bool)
+    if workspace:FindFirstChild("Plots") then
+        for _, v in pairs(workspace.Plots:GetChildren()) do
+            if v:FindFirstChild("InvisibleWalls") then
+                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
+                    wall.CanCollide = not bool
+                end
+            end
         end
-    elseif sbase and mouse.Target then
+    end
+end)
+
+-- Auto Steal Event Listener
+workspace.ChildAdded:Connect(function(c)
+    if c:IsA("Model") and c:FindFirstChild("RootPart") and c.RootPart:FindFirstChildWhichIsA("WeldConstraint") then
+        if c.RootPart:FindFirstChildWhichIsA("WeldConstraint").Part0 == localplr.Character.HumanoidRootPart then
+            task.wait(2.5)
+            if c.Parent == workspace and autosteal then
+                pcall(function()
+                    if game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/StealService/DeliverySteal") then
+                        game.ReplicatedStorage.Packages.Net["RE/StealService/DeliverySteal"]:FireServer()
+                    elseif game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/3891348e-5b69-47f3-af95-20012defb3fe") then
+                        game.ReplicatedStorage.Packages.Net["RE/3891348e-5b69-47f3-af95-20012defb3fe"]:FireServer("a708cd00-2836-4a0c-8b0a-59da79aaebea")
+                    end
+                end)
+            end
+        end
+    end
+end)
+
+-- Selection Box Listener
+local mouse = localplr:GetMouse()
+mouse.Button1Down:Connect(function()
+    if sbase and mouse.Target and workspace:FindFirstChild("Plots") then
         gotobase = nil
         for _, v in pairs(workspace.Plots:GetChildren()) do
             if mouse.Target:IsDescendantOf(v) then
                 gotobase = v
+                break
             end
         end
-        if gotobase then sbox.Adornee = gotobase end
-    end
-end))
-
-local precentagetext = nil
-local lgt = false
-lib.maketoggle("Loop goto click position", main, function(bool)
-    lgt = bool
-    if posgoto and lgt then
-        local pos = posgoto
-        posgoto = nil
-        loopclickpart.Transparency = 1
-        repeat
-            task.wait()
-            if localplr.Character and localplr.Character:FindFirstChild("HumanoidRootPart") then
-                localplr.Character.HumanoidRootPart.CFrame = pos
-            end
-        until not lgt
-    end
-end)
-
-lib.maketextbox("Proximity Prompt Range", main, function(txt)
-    for _, v in pairs(workspace.Plots:GetDescendants()) do
-        if v:IsA("ProximityPrompt") then
-            v.MaxActivationDistance = tonumber(txt) or 10
+        if gotobase then
+            sbox.Adornee = gotobase
         end
     end
 end)
-
-lib.maketoggle("Show Hitboxes", main, function(bool)
-    for _, v in pairs(workspace.Plots:GetChildren()) do
-        if v:FindFirstChild("InvisibleWalls") then
-            for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
-                wall.Transparency = bool and 0.5 or 1
-            end
-        end
-    end
-end)
-
-lib.maketoggle("Noclip Hitboxes", main, function(bool)
-    for _, v in pairs(workspace.Plots:GetChildren()) do
-        if v:FindFirstChild("InvisibleWalls") then
-            for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
-                wall.CanCollide = not bool
-            end
-        end
-    end
-end)
-
-lib.ondestroyedfunc = function()
-    lgt = false
-    pcall(function() loopclickpart:Destroy() end)
-    pcall(function() sbox:Destroy() end)
-    for _, v in pairs(tableofconnections) do pcall(function() v:Disconnect() end) end
-    on = false
-    gtb = false
-    pbt = false
-    antiragdoll = false
-end
