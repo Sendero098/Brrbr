@@ -1,18 +1,12 @@
 --[[=================================================================
-  VENICE HUB  ::  STEAL A BRAINROT  ::  v2.3
-  v2.3 changes vs v2.2:
-   * KICK FORENSICS + AC BYPASS NOW RUN FIRST (before any UI is built)
-   * persistent kick log across sessions (writefile) + stack trace of
-     whoever called Kick -> we finally learn WHY you get kicked
-   * extra kick/disconnect vectors watched (PlayerRemoving, Ancestry,
-     LogService, OnClose) + swallowed-kick re-arm
-   * fixed findBrainrotModel (was returning the "Claim" model itself)
-   * names now read from prompt.ObjectText
-   * per-prompt fire cooldown, range guard, steal verification + retry
-   * returnToBase warps to YOUR delivery spot, not your last position
-   * acSeen is weak-keyed (no GC leak), cheaper scan loop
-   * NEW: Auto Lock Base, server scanner/hop-until-OG, gear aim
-   * NEW: DEEP DUMP -> copies everything needed to build a rarity table
+  VENICE HUB  ::  STEAL A BRAINROT  ::  v2.4
+  v2.4 changes vs v2.3:
+   * AC bypass now hooks ONE observeTag and STOPS (was hooking every
+     copy -> hooked:2 -> anti-cheat noticed -> instant kick)
+   * if the auto-exec bypass is present, hub switches itself to
+     acMode="off" so the two don't fight over the same function
+   * kick re-arm resets the scan properly
+   * bypass presence shown in diag
 =================================================================]]
 
 local Players         = game:GetService("Players")
@@ -40,12 +34,10 @@ local KICKFILE = "VeniceHub_kicklog.txt"
 local HOPFILE  = "VeniceHub_hop.json"
 
 local S = {
-    -- anti-cheat / kick
     antiCheat   = true,
-    acMode      = "keepalive",   -- keepalive | kill | off
+    acMode      = "single",      -- single (proven) | all | off
     swallow     = true,
     rejoinOnKick= false,
-    -- steal
     autoSteal   = false,
     richestFirst= true,
     minValue    = 0,
@@ -62,19 +54,16 @@ local S = {
     retryOnce   = true,
     maxRangeFrac= 0.9,
     requireBody = true,
-    -- automation
     autoLock    = false,
     lockEvery   = 45,
     autoCollect = false,
     instantPrompts = false,
     autoRebirth = false,
     antiAfk     = true,
-    -- visuals
     espBrainrots= false,
     espPlayers  = false,
     fullbright  = false,
     noFog       = false,
-    -- character
     infJump     = false,
     noclip      = false,
     fly         = false,
@@ -82,22 +71,23 @@ local S = {
     walkSpeed   = 20,
     jumpPower   = 50,
     flySpeed    = 55,
-    -- gear
     gearAim     = false,
     gearAutoFire= false,
     gearRange   = 60,
     gearFireCd  = 0.45,
     gearSmooth  = 0.3,
     gearNames   = "superman,slap,bat,grapple,medusa,freeze",
-    -- scanner
-    scanTarget  = 300,   -- millions of $ -> hop until a server beats this
+    scanTarget  = 300,
     hopMax      = 45,
 }
+
+-- the auto-exec bypass already neutered observeTag -> don't duplicate it
+if gv().VH_BYPASS_AT then S.acMode = "off" end
 
 local conns = {}
 local function bind(c) table.insert(conns, c); return c end
 
-local statusLbl, diagLabel, GUI, scanLbl
+local statusLbl, diagLabel, GUI
 local lastKick, kickCount, swallowed = "none", 0, 0
 local kickLog = {}
 
@@ -110,9 +100,7 @@ local function fsRead(p)
     end)
     return ok and d or nil
 end
-local function fsWrite(p, txt)
-    if writefile then pcall(writefile, p, txt) end
-end
+local function fsWrite(p, txt) if writefile then pcall(writefile, p, txt) end end
 local function fsAppend(p, line)
     if not writefile then return end
     local prev = fsRead(p) or ""
@@ -136,7 +124,6 @@ local function noteKick(tag, msg, tb)
     fsAppend(KICKFILE, head)
     if tb and tb ~= "" then fsAppend(KICKFILE, "   caller: " .. tb) end
     pcall(print, "[VeniceHub][KICK] " .. head)
-    if tb and tb ~= "" then pcall(print, "[VeniceHub][CALLER] " .. tb) end
     if statusLbl then statusLbl.Text = "KICK(" .. kickCount .. "): " .. lastKick end
 end
 
@@ -150,7 +137,9 @@ end
 
 local kickHookDone = false
 local function installKickHook()
-    if kickHookDone or not hookfunction then return false end
+    if kickHookDone then return true end
+    if gv().VH_KICK then kickHookDone = true; return true end
+    if not hookfunction then return false end
     local wrap = newcclosure or function(f) return f end
     local ok = pcall(function()
         local old
@@ -163,10 +152,9 @@ local function installKickHook()
                         pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
                     end)
                 else
-                    -- re-arm: AC may have replaced our hooks during its kick
                     task.delay(0.6, function()
-                        pcall(function() if old then hookfunction(LP.Kick, LP.Kick) end end)
-                        if S.antiCheat then task.spawn(acScanOnce) end
+                        pcall(function() acReset() end)
+                        if S.antiCheat then pcall(function() acScanOnce() end) end
                     end)
                 end
                 return
@@ -180,40 +168,33 @@ end
 
 --===================== AC BYPASS ==================================
 local acHooked, acScans = 0, 0
-local acSeen = setmetatable({}, { __mode = "k" })   -- weak keys, no leak
+local acSeen = setmetatable({}, { __mode = "k" })
 
 local function acStub()
     local wrap = newcclosure or function(f) return f end
-    return wrap(function()
+    return wrap(function(...)
         return { Disconnect = function() end, disconnect = function() end, Connected = true }
     end)
+end
+
+function acReset()
+    acSeen = setmetatable({}, { __mode = "k" })
+    acHooked = 0
 end
 
 function acScanOnce()
     if not (getgc and hookfunction) then return end
     if S.acMode == "off" then return end
-    local wrap = newcclosure or function(f) return f end
-    local stub = acStub()
-    local kill = (S.acMode == "kill")
-    local gc = getgc(true)
-    for _, v in pairs(gc) do
+    if S.acMode == "single" and acHooked >= 1 then return end
+    for _, v in pairs(getgc(true)) do
         if type(v) == "table" and acSeen[v] == nil then
             local fn = rawget(v, "observeTag")
             if type(fn) == "function" then
                 acSeen[v] = true
-                local done = false
-                if kill then
-                    -- variant B: immediately tear the watcher down
-                    local ok = pcall(hookfunction, fn, wrap(function(...)
-                        local conn = fn(...)
-                        pcall(function() if conn and conn.Disconnect then conn.Disconnect(conn) end end)
-                        return conn
-                    end))
-                    done = ok
-                else
-                    done = pcall(hookfunction, fn, stub)
+                if pcall(hookfunction, fn, acStub()) then
+                    acHooked = acHooked + 1
+                    if S.acMode == "single" then return end
                 end
-                if done then acHooked = acHooked + 1 end
             end
         end
     end
@@ -338,8 +319,6 @@ local function getBaseDrop()
     return any and any.Position or nil
 end
 
--- FIXED: the brainrot lives inside the podium's "Claim" model.
--- v2.2 searched pod children for the first Model -> always returned Claim.
 local function findBrainrotModel(pod)
     local claim = pod:FindFirstChild("Claim")
     if claim then
@@ -884,7 +863,7 @@ end))
 bind(LogService.MessageOut:Connect(function(msg, typ)
     local m = tostring(msg)
     local low = m:lower()
-    if low:find("kick") or low:find("detect") or low:find("suspi") or low:find("anti%-cheat") then
+    if low:find("kick") or low:find("detect") or low:find("suspi") then
         table.insert(kickLog, "LOG  " .. m)
         fsAppend(KICKFILE, "LOG  " .. m)
     end
@@ -895,16 +874,18 @@ local function diagnose()
     local L = {}
     local function out(s) table.insert(L, s) end
 
-    out("=== VENICE HUB DIAG v2.3 ===")
+    out("=== VENICE HUB DIAG v2.4 ===")
     out("time      = " .. os.date("%H:%M:%S"))
     out("place     = " .. tostring(game.PlaceId) .. "  ver=" .. tostring(game.PlaceVersion))
     out("job       = " .. tostring(game.JobId))
     out("executor  = hookfunction:" .. tostring(hookfunction ~= nil)
         .. " getgc:" .. tostring(getgc ~= nil)
-        .. " fireprompt:" .. tostring(fireproximityprompt ~= nil)
-        .. " gethui:" .. tostring(gethui ~= nil)
+        .. " newcclosure:" .. tostring(newcclosure ~= nil)
         .. " writefile:" .. tostring(writefile ~= nil)
         .. " queue:" .. tostring(queue_on_teleport ~= nil))
+    out("bypass    = autoexec:" .. tostring(gv().VH_BYPASS_AT ~= nil)
+        .. " obsHooked:" .. tostring(gv().VH_OBS == true)
+        .. " kickHooked:" .. tostring(gv().VH_KICK == true))
     out("anticheat = hooked:" .. acHooked .. " scans:" .. acScans
         .. " mode:" .. S.acMode .. " kickhook:" .. tostring(kickHookDone))
     out("kicks     = " .. kickCount .. "  swallowed:" .. swallowed .. "  last: " .. lastKick)
@@ -933,18 +914,15 @@ local function diagnose()
             p.HoldDuration, p.MaxActivationDistance, tostring(p.Enabled)))
         out(string.format("   action=%s  object=%s  value=%d", tostring(p.ActionText), tostring(p.ObjectText), t.value))
         if hrp then out(string.format("   dist=%.1f", (t.pos - hrp.Position).Magnitude)) end
-        local kids = {}
-        for _, c in ipairs(t.pod:GetChildren()) do table.insert(kids, c.Name .. "[" .. c.ClassName .. "]") end
-        out("   podium kids = " .. table.concat(kids, ", "))
     end
 
-    out("--- prev session kicks (persisted) ---")
+    out("--- persisted log (all sessions) ---")
     local prev = fsRead(KICKFILE)
     if prev and prev ~= "" then
         local i = 0
         for l in prev:gmatch("[^\n]+") do
             i = i + 1
-            if i > 12 then break end
+            if i > 14 then break end
             out("  " .. l)
         end
     else
@@ -957,7 +935,7 @@ end
 local function deepDump()
     local L = {}
     local function out(s) table.insert(L, s) end
-    out("=== VENICE HUB DEEP DUMP v2.3 ===")
+    out("=== VENICE HUB DEEP DUMP v2.4 ===")
     out("place=" .. tostring(game.PlaceId) .. " job=" .. tostring(game.JobId))
 
     out("--- leaderstats ---")
@@ -980,7 +958,7 @@ local function deepDump()
         end
     end
 
-    out("--- gui buttons (candidates for lock/rebirth) ---")
+    out("--- visible gui buttons ---")
     local pg = LP:FindFirstChild("PlayerGui")
     if pg then
         local n = 0
@@ -1001,7 +979,6 @@ local function deepDump()
         for k, v in pairs(t.prompt:GetAttributes()) do out("    P.attr " .. k .. " = " .. tostring(v)) end
         out("  podium " .. t.pod:GetFullName())
         for k, v in pairs(t.pod:GetAttributes()) do out("    O.attr " .. k .. " = " .. tostring(v)) end
-        out("  descendants:")
         local n = 0
         for _, d in ipairs(t.pod:GetDescendants()) do
             n = n + 1
@@ -1014,7 +991,7 @@ local function deepDump()
         out("  (no target in this server)")
     end
 
-    out("--- all brainrot names currently in server ---")
+    out("--- all brainrot names in server ---")
     local names = {}
     for _, plot in ipairs(getPlots()) do
         local podiums = plot:FindFirstChild("AnimalPodiums")
@@ -1088,7 +1065,7 @@ corner(titleBar, 14)
 
 mk("TextLabel", {
     Size = UDim2.new(1, -120, 0, 18), Position = UDim2.new(0, 12, 0, 4),
-    BackgroundTransparency = 1, Text = "VENICE HUB  v2.3",
+    BackgroundTransparency = 1, Text = "VENICE HUB  v2.4",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, titleBar)
@@ -1311,9 +1288,9 @@ end
 local mainTab = pages.Main
 addLabel(mainTab, "SAFETY FIRST")
 
-addToggle(mainTab, "Anti-Cheat Bypass (observeTag hook)", true, function(v)
+addToggle(mainTab, "Anti-Cheat Bypass (hub-side)", true, function(v)
     S.antiCheat = v
-    if v then startAntiCheatBypass() end
+    if v and S.acMode ~= "off" then startAntiCheatBypass() end
 end)
 
 addToggle(mainTab, "Swallow Kick (log + stay in game)", true, function(v) S.swallow = v end)
@@ -1460,11 +1437,6 @@ addButton(scanTab, "STOP AUTO HOP (stay here)", function()
 end, Color3.fromRGB(180,50,60))
 addButton(scanTab, "HOP NEXT - Fewest Players", function() doHop({ auto = false, tries = 0, visited = {} }) end)
 
-addLabel(scanTab, "NOTES")
-addLabel(scanTab, "Auto Hop saves state to a file and re-runs the script on", C.dim)
-addLabel(scanTab, "arrival, so it keeps hopping until it finds a stacked", C.dim)
-addLabel(scanTab, "server, then stops. Enable Auto Steal to loot it.", C.dim)
-
 --===================== GEAR TAB ===================================
 local gearTab = pages.Gear
 addLabel(gearTab, "GEAR AIM / AUTO SWING")
@@ -1473,15 +1445,7 @@ addToggle(gearTab, "Auto Swing when in range", false, function(v) S.gearAutoFire
 addSlider(gearTab, "Range (studs)", 10, 200, 60, function(v) S.gearRange = v end)
 addSlider(gearTab, "Swing Cooldown x100", 10, 200, 45, function(v) S.gearFireCd = v / 100 end)
 addSlider(gearTab, "Aim Smoothness x100", 5, 100, 30, function(v) S.gearSmooth = v / 100 end)
-addLabel(gearTab, "GEAR NAME FILTER (comma separated)")
-addLabel(gearTab, "default: " .. S.gearNames, C.dim)
-addButton(gearTab, "Set Filter -> type in chat prompt is skipped; edit here:", function()
-    if statusLbl then statusLbl.Text = "filter = " .. S.gearNames end
-end)
-addLabel(gearTab, "Aim only engages while an equipped tool name contains", C.dim)
-addLabel(gearTab, "one of the filter words. Superman is included.", C.dim)
-addLabel(gearTab, "Tip: while CARRYING a brainrot most gears are disabled,", C.dim)
-addLabel(gearTab, "so aim is for fighting, not for the steal itself.", C.dim)
+addLabel(gearTab, "filter: " .. S.gearNames, C.dim)
 
 --===================== VISUALS TAB ================================
 local visTab = pages.Vis
@@ -1584,16 +1548,16 @@ end
 --===================== MISC TAB ===================================
 local miscTab = pages.Misc
 addLabel(miscTab, "ANTI-DETECTION")
-addButton(miscTab, "Re-scan GC now (re-hook observeTag)", function()
-    acScanOnce()
-    if statusLbl then statusLbl.Text = "ac: hooked=" .. acHooked .. " scans=" .. acScans end
-end)
-addButton(miscTab, "Switch Bypass Mode: keepalive / kill", function()
-    S.acMode = (S.acMode == "keepalive") and "kill" or "keepalive"
-    acSeen = setmetatable({}, { __mode = "k" })
-    acHooked = 0
+addButton(miscTab, "Cycle Bypass Mode: single / all / off", function()
+    S.acMode = (S.acMode == "single") and "all" or (S.acMode == "all") and "off" or "single"
+    acReset()
     acScanOnce()
     if statusLbl then statusLbl.Text = "acMode = " .. S.acMode .. " (hooked=" .. acHooked .. ")" end
+end)
+addButton(miscTab, "Re-scan now", function()
+    acReset()
+    acScanOnce()
+    if statusLbl then statusLbl.Text = "ac: hooked=" .. acHooked .. " scans=" .. acScans end
 end)
 addToggle(miscTab, "Anti-AFK", true, function(v) S.antiAfk = v end)
 
@@ -1683,10 +1647,6 @@ local function getCash()
         local first = ls:FindFirstChildWhichIsA("ValueBase")
         if first then return first.Value end
     end
-    for _, a in ipairs({ "Cash", "Money", "Coins" }) do
-        local v = LP:GetAttribute(a)
-        if typeof(v) == "number" then return v end
-    end
     return nil
 end
 bind(RunService.Heartbeat:Connect(function(dt)
@@ -1700,7 +1660,7 @@ end))
 
 --===================== BOOT =======================================
 installKickHook()
-if S.antiCheat then startAntiCheatBypass() end
+if S.antiCheat and S.acMode ~= "off" then startAntiCheatBypass() end
 
 bind(Players.PlayerRemoving:Connect(function(p)
     if p == LP then noteKick("PlayerRemoving", "server removed us (no Kick signal)") end
@@ -1715,7 +1675,6 @@ task.spawn(refreshList)
 task.spawn(refreshPlayerList)
 task.delay(6, runDiagnose)
 
--- resume an auto-hop run after a teleport
 task.spawn(function()
     local st = loadHop()
     if not st or not st.auto then return end
@@ -1724,7 +1683,7 @@ task.spawn(function()
     local best = bestInServer()
     if best and best.value >= (st.target or 0) then
         saveHop(nil)
-        local msg = "FOUND " .. best.name .. " $" .. math.floor(best.value) .. " in " .. tostring(game.JobId)
+        local msg = "FOUND " .. best.name .. " $" .. math.floor(best.value)
         if statusLbl then statusLbl.Text = msg end
         if diagLabel then diagLabel.Text = msg end
         pcall(function() if setclipboard then setclipboard(msg) end end)
@@ -1736,4 +1695,4 @@ end)
 
 main.Visible = true
 if statusLbl then statusLbl.Text = "ready - " .. tostring(#getPlots()) .. " plots" end
-print("[VeniceHub] v2.3 loaded OK")
+print("[VeniceHub] v2.4 loaded OK")
