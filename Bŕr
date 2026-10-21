@@ -1,12 +1,19 @@
 --[[=================================================================
-  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.0
+  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.1  (ANTI-KICK FIX)
   ---------------------------------------------------------------
-  v4.0: NOTHING at top level can kill the script anymore.
-  * whole body runs inside pcall -> any error is logged, not fatal
-  * observeTag is the ONLY thing hooked (exact proven bypass)
-  * kick logging via signal watchers, not extra hooks
-  * [VH] step markers printed to the console so we always know
-    how far it got, even if you get kicked 2s later
+  v4.1 FIXES:
+  * bypass runs at TOP LEVEL, before the UI is even built
+  * observeTag found TWO ways (table key + debug.getinfo name),
+    and EVERY match is hooked, not just the first
+  * hook calls the ORIGINAL observeTag (returned by hookfunction)
+    and keeps the REAL RBXScriptConnection -> typeof stays correct
+  * Disconnect neutered at the RBXScriptConnection metatable, only
+    for connections observeTag handed out -> the AC can no longer
+    tear down its own watchers -> no kick
+  * watchdog moved to top level (survives MAIN errors), faster
+    auto-rejoin, TeleportInitFailed handled
+  * last kick reason captured and shown in the UI
+  * quieter defaults: WalkSpeed 16, Instant Prompts off, slower steal
 =================================================================]]
 
 local LOGF = "VeniceHub_log.txt"
@@ -21,7 +28,7 @@ local function log(s)
         local t = {}
         for l in prev:gmatch("[^\n]+") do table.insert(t, l) end
         table.insert(t, line)
-        while #t > 150 do table.remove(t, 1) end
+        while #t > 200 do table.remove(t, 1) end
         writefile(LOGF, table.concat(t, "\n"))
     end)
 end
@@ -31,116 +38,198 @@ gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
 local GEN = gv().VeniceHubGen
 local function alive() return gv().VeniceHubGen == GEN end
 
-log("=== v4.0 boot place=" .. tostring(game.PlaceId) .. " ===")
+log("=== v4.1 boot place=" .. tostring(game.PlaceId) .. " ===")
 log("executor: getgc=" .. tostring(getgc ~= nil)
     .. " hookfn=" .. tostring(hookfunction ~= nil)
     .. " ncc=" .. tostring(newcclosure ~= nil)
+    .. " rawmt=" .. tostring(getrawmetatable ~= nil)
     .. " write=" .. tostring(writefile ~= nil))
 
 local LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Sendero098/Brrbr/refs/heads/main/B%C5%95r"))()'
 pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
 
---==============================================================
-local function MAIN()
+--================================================================
+--  BYPASS  (top level, before anything else)
+--================================================================
+local BYP = {
+    hooked   = setmetatable({}, { __mode = "k" }),  -- [origfn] = true
+    tagged   = setmetatable({}, { __mode = "k" }),  -- [connection] = true
+    connMt   = nil,
+    tagCount = 0,
+    armed    = 0,
+}
+local obsReady = false
 
---=========== 1. THE BYPASS  (only observeTag is touched) =======
-local obsHooked = false
+-- neuter Disconnect only for connections observeTag handed out
+local function hookConnMt()
+    if BYP.connMt then return true end
+    if not (getrawmetatable and hookfunction and newcclosure) then return false end
+    local ok = pcall(function()
+        local probe = game:GetService("RunService").Heartbeat:Connect(function() end)
+        local mt = getrawmetatable(probe)
+        if not mt then return end
+        if setreadonly then pcall(setreadonly, mt, false) end
+        local idx = rawget(mt, "__index")
+        if type(idx) ~= "table" then pcall(function() probe:Disconnect() end); return end
+        if setreadonly then pcall(setreadonly, idx, false) end
+        local od = rawget(idx, "Disconnect")
+        if type(od) == "function" then
+            rawset(idx, "Disconnect", newcclosure(function(self, ...)
+                if BYP.tagged[self] then return end
+                return od(self, ...)
+            end))
+            local odl = rawget(idx, "disconnect")
+            if type(odl) == "function" then
+                rawset(idx, "disconnect", newcclosure(function(self, ...)
+                    if BYP.tagged[self] then return end
+                    return odl(self, ...)
+                end))
+            end
+            BYP.connMt = idx
+        end
+        pcall(function() probe:Disconnect() end)
+    end)
+    return BYP.connMt ~= nil
+end
 
-local function armObserveTag()
-    if obsHooked then return true end
-    if not (getgc and hookfunction and newcclosure) then
-        log("step: bypass SKIPPED - missing executor funcs")
-        return false
-    end
-    local ok, res = pcall(function()
+local function hookObserveTag()
+    if not (getgc and hookfunction and newcclosure) then return 0 end
+    if not BYP.connMt then hookConnMt() end
+    local n = 0
+    pcall(function()
         for _, v in pairs(getgc(true)) do
-            if typeof(v) == "table" then
-                local fn = rawget(v, "observeTag")
-                if typeof(fn) == "function" then
-                    if pcall(hookfunction, fn, newcclosure(function(...)
-                        return { Disconnect = function() end, disconnect = function() end }
-                    end)) then
-                        obsHooked = true
-                        gv().VH_OBS = true
-                        return true
+            local fn
+            if type(v) == "table" then
+                local f = rawget(v, "observeTag")
+                if type(f) == "function" then fn = f end
+            elseif type(v) == "function" then
+                local ok, info = pcall(debug.getinfo, v)
+                if ok and info and info.name == "observeTag" then fn = v end
+            end
+            if fn and not BYP.hooked[fn] then
+                local old
+                local ok2, ret = pcall(hookfunction, fn, newcclosure(function(...)
+                    local conn = old(...)
+                    if conn then
+                        BYP.tagCount = BYP.tagCount + 1
+                        if BYP.connMt then
+                            BYP.tagged[conn] = true
+                            return conn
+                        end
+                        return setmetatable({
+                            Connected = true,
+                            Disconnect = function() end,
+                            disconnect = function() end,
+                        }, { __index = function(_, k) return conn[k] end })
                     end
+                    return conn
+                end))
+                if ok2 then
+                    old = ret
+                    BYP.hooked[fn] = true
+                    n = n + 1
                 end
             end
         end
-        return false
     end)
-    if not ok then log("step: getgc/hook error -> " .. tostring(res)) end
-    return obsHooked
+    if n > 0 then
+        BYP.armed = BYP.armed + n
+        obsReady = true
+        gv().VH_OBS = true
+        log("bypass: observeTag hooked x" .. tostring(n) .. "  connMt=" .. tostring(BYP.connMt ~= nil))
+    end
+    return n
 end
 
-log("step: arming observeTag")
-pcall(armObserveTag)
-log("step: observeTag hooked = " .. tostring(obsHooked))
+log("step: arming bypass")
+pcall(hookObserveTag)
+log("step: bypass armed=" .. tostring(BYP.armed) .. " connMt=" .. tostring(BYP.connMt ~= nil))
 
+-- retry hard for the first 60s (AC may define observeTag late)
 task.spawn(function()
     for _ = 1, 240 do
-        if obsHooked then return end
+        if obsReady then return end
         task.wait(0.25)
-        pcall(armObserveTag)
-        if obsHooked then log("step: observeTag hooked LATE"); return end
+        pcall(hookObserveTag)
+        if obsReady then log("step: bypass armed LATE"); return end
     end
 end)
-
+-- and keep checking forever in case the AC rebuilds it
 task.spawn(function()
     while alive() do
         task.wait(10)
-        if not obsHooked then pcall(armObserveTag) end
+        pcall(hookObserveTag)
     end
 end)
 
---=========== 2. REMOVAL WATCHERS  (no hooks) ===================
+--================================================================
+--  KICK WATCHDOG  (top level, survives MAIN errors)
+--================================================================
+local TS  = game:GetService("TeleportService")
+local PLRS = game:GetService("Players")
+
+local CFG = { autoRejoin = true }
 local lastRejoin = 0
+local lastKick = "(none)"
+
 local function tryRejoin(why)
-    if os.clock() - lastRejoin < 12 then return end
+    if not CFG.autoRejoin then return end
+    if os.clock() - lastRejoin < 6 then return end
     lastRejoin = os.clock()
     log("auto-rejoin: " .. why)
-    pcall(function()
-        game:GetService("TeleportService"):Teleport(game.PlaceId, game:GetService("Players").LocalPlayer)
-    end)
+    pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
+    pcall(function() TS:Teleport(game.PlaceId, PLRS.LocalPlayer) end)
 end
 
+pcall(function()
+    TS.TeleportInitFailed:Connect(function(_, code, msg)
+        log("teleport FAILED " .. tostring(code) .. " " .. tostring(msg))
+        lastRejoin = 0
+    end)
+end)
+
 task.spawn(function()
-    local Players = game:GetService("Players")
-    local lp = Players.LocalPlayer
-    for _ = 1, 400 do if lp then break end; task.wait(0.1); lp = Players.LocalPlayer end
+    local lp = PLRS.LocalPlayer
+    for _ = 1, 400 do if lp then break end; task.wait(0.1); lp = PLRS.LocalPlayer end
     if not lp then log("step: no LocalPlayer"); return end
     pcall(function()
-        Players.PlayerRemoving:Connect(function(p)
+        PLRS.PlayerRemoving:Connect(function(p)
             if p == lp then
-                log("*** REMOVED *** PlayerRemoving for us")
-                task.delay(0.5, function() tryRejoin("removed") end)
+                lastKick = "PlayerRemoving"
+                log("*** REMOVED *** PlayerRemoving")
+                task.delay(0.4, function() tryRejoin("removed") end)
             end
         end)
         lp.AncestryChanged:Connect(function(_, parent)
-            if not parent then log("*** REMOVED *** LocalPlayer left DataModel") end
+            if not parent then lastKick = "left DataModel"; log("*** REMOVED *** left DataModel") end
         end)
     end)
     pcall(function()
         game:GetService("LogService").MessageOut:Connect(function(msg)
             local m = tostring(msg)
             local low = m:lower()
-            if low:find("kick") or low:find("exploit") or low:find("detect") or low:find("anti") then
+            if low:find("kick") or low:find("exploit") or low:find("detect")
+            or low:find("anti") or low:find("cheat") or low:find("verif") then
+                lastKick = m
                 log("LOGSVC: " .. m)
             end
         end)
     end)
-    log("step: watchers armed")
+    log("step: watchdog armed")
 end)
 
+--==============================================================
+local function MAIN()
+
 --=========== 3. SERVICES / STATE ===============================
-local Players         = game:GetService("Players")
+local Players         = PLRS
 local RunService      = game:GetService("RunService")
 local UIS             = game:GetService("UserInputService")
 local TweenService    = game:GetService("TweenService")
 local Lighting        = game:GetService("Lighting")
 local Workspace       = game:GetService("Workspace")
 local HttpService     = game:GetService("HttpService")
-local TeleportService = game:GetService("TeleportService")
+local TeleportService = TS
 local VirtualUser     = game:GetService("VirtualUser")
 
 local LP  = Players.LocalPlayer
@@ -148,11 +237,11 @@ local CAM = Workspace.CurrentCamera
 
 local S = {
     autoSteal=false, richestFirst=true, minValue=0, legitPrompt=true, fireCooldown=0.9,
-    settleTime=0.35, holdTime=0.15, stealDelay=0.20, returnToBase=true, baseReturn=true,
+    settleTime=0.4, holdTime=0.18, stealDelay=0.28, returnToBase=true, baseReturn=true,
     safeTP=true, tpOnly=false, verify=true, retryOnce=true, maxRangeFrac=0.9, requireBody=true,
     autoLock=false, lockEvery=45, autoCollect=false, instantPrompts=false, autoRebirth=false,
     antiAfk=true, espBrainrots=false, espPlayers=false, noclip=false, infJump=false, fly=false,
-    lockSpeed=false, walkSpeed=20, jumpPower=50, flySpeed=55,
+    lockSpeed=false, walkSpeed=16, jumpPower=50, flySpeed=55,
     gearAim=false, gearAutoFire=false, gearRange=60, gearFireCd=0.45, gearSmooth=0.3,
     gearNames="superman,slap,bat,grapple,medusa,freeze",
     scanTarget=300, hopMax=45,
@@ -160,7 +249,7 @@ local S = {
 
 local conns = {}
 local function bind(c) table.insert(conns, c); return c end
-local statusLbl, diagLabel, GUI, obsLbl
+local statusLbl, diagLabel, GUI, obsLbl, kickLbl
 
 --=========== 4. UTILS ==========================================
 local function mk(class, props, parent)
@@ -704,13 +793,15 @@ end))
 local function diagnose()
     local L = {}
     local function out(s) table.insert(L, s) end
-    out("=== VENICE HUB DIAG v4.0 ===")
+    out("=== VENICE HUB DIAG v4.1 ===")
     out("time      = " .. os.date("%H:%M:%S"))
     out("place     = " .. tostring(game.PlaceId))
     out("job       = " .. tostring(game.JobId))
-    out("obsHooked = " .. tostring(obsHooked))
+    out("BYPASS    = armed x" .. tostring(BYP.armed) .. "  connMt=" .. tostring(BYP.connMt ~= nil)
+        .. "  tagged=" .. tostring(BYP.tagCount))
     out("executor  = getgc:" .. tostring(getgc ~= nil) .. " hookfn:" .. tostring(hookfunction ~= nil)
-        .. " write:" .. tostring(writefile ~= nil))
+        .. " ncc:" .. tostring(newcclosure ~= nil) .. " rawmt:" .. tostring(getrawmetatable ~= nil))
+    out("lastKick  = " .. tostring(lastKick))
     out("gui parent= " .. (GUI and GUI.Parent and GUI.Parent:GetFullName() or "none"))
     out("plots     = " .. #getPlots())
     out("myplot    = " .. (getMyPlot() and "yes" or "NO"))
@@ -765,7 +856,7 @@ corner(main, 14); stroke(main, Color3.fromRGB(80,70,130), 1.5, 0.35)
 local titleBar = mk("Frame", { Size=UDim2.new(1,0,0,52), BackgroundColor3=C.panel, BorderSizePixel=0 }, main)
 corner(titleBar, 14)
 mk("TextLabel", { Size=UDim2.new(1,-120,0,18), Position=UDim2.new(0,12,0,4), BackgroundTransparency=1,
-    Text="VENICE HUB  v4.0", TextColor3=C.text, Font=Enum.Font.GothamBold, TextSize=14,
+    Text="VENICE HUB  v4.1", TextColor3=C.text, Font=Enum.Font.GothamBold, TextSize=14,
     TextXAlignment=Enum.TextXAlignment.Left }, titleBar)
 statusLbl = mk("TextLabel", { Size=UDim2.new(1,-120,0,14), Position=UDim2.new(0,12,0,22),
     BackgroundTransparency=1, Text="booting...", TextColor3=C.dim, Font=Enum.Font.GothamMedium,
@@ -888,7 +979,7 @@ local function addSlider(parent, label, min, max, default, cb)
         if i.UserInputType == Enum.UserInputType.Touch
         or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
     end))
-    return { get = function() return val end }
+    return { get = function() return val }
 end
 local function addLabel(parent, text, color)
     local l = mk("TextLabel", { Size=UDim2.new(1,0,0,20), BackgroundTransparency=1, Text=text,
@@ -912,16 +1003,22 @@ end
 
 --=========== 14. TABS ==========================================
 local mainTab = pages.Main
-addLabel(mainTab, "BYPASS")
+addLabel(mainTab, "BYPASS / ANTI-KICK")
 addButton(mainTab, "SHOW DIAG + LOG TAIL", showDiag, C.accent)
-diagLabel = addOutput(mainTab, 170)
-addButton(mainTab, "Re-arm observeTag now", function()
-    pcall(armObserveTag)
+diagLabel = addOutput(mainTab, 150)
+addButton(mainTab, "RE-ARM BYPASS NOW", function()
+    local n = hookObserveTag()
     if obsLbl then
-        obsLbl.Text = "BYPASS: " .. (obsHooked and "HOOKED" or "FAILED")
-        obsLbl.TextColor3 = obsHooked and C.on or C.bad
+        obsLbl.Text = "BYPASS: " .. (BYP.armed > 0 and ("ARMED x" .. BYP.armed) or "FAILED")
+        obsLbl.TextColor3 = BYP.armed > 0 and C.on or C.bad
     end
+    log("manual re-arm -> hooked " .. tostring(n))
 end)
+addToggle(mainTab, "Auto-Rejoin On Kick", true, function(v) CFG.autoRejoin = v end)
+kickLbl = mk("TextLabel", { Size=UDim2.new(1,0,0,28), BackgroundTransparency=1, Text="kick: (none)",
+    TextColor3=C.dim, Font=Enum.Font.Code, TextSize=10, TextWrapped=true,
+    TextXAlignment=Enum.TextXAlignment.Left }, mainTab)
+mk("UIPadding", { PaddingLeft=UDim.new(0,6) }, kickLbl)
 addButton(mainTab, "COPY LOG FILE", function()
     local d
     pcall(function() d = readfile and readfile(LOGF) end)
@@ -943,9 +1040,11 @@ addButton(mainTab, "Hop - Fewest Players", function() doHop({ auto=false, tries=
 local stealTab = pages.Steal
 addToggle(stealTab, "Legit Prompt", true, function(v) S.legitPrompt = v end)
 addToggle(stealTab, "Verify + Retry", true, function(v) S.verify = v; S.retryOnce = v end)
-addToggle(stealTab, "Safe TP", true, function(v) S.safeTP = v end)
+addToggle(stealTab, "Safe TP (Anchor)", true, function(v) S.safeTP = v end)
 addToggle(stealTab, "Return to Base", true, function(v) S.returnToBase = v end)
 addSlider(stealTab, "Min Value (millions)", 0, 500, 0, function(v) S.minValue = v end)
+addSlider(stealTab, "Steal Delay (ms)", 50, 800, 280, function(v) S.stealDelay = v / 1000 end)
+addSlider(stealTab, "Settle Time (ms)", 50, 800, 400, function(v) S.settleTime = v / 1000 end)
 addButton(stealTab, "Steal Richest Now", function() doSteal(scanTargets(false)[1]) end, C.accent)
 
 local scanTab = pages.Scan
@@ -976,7 +1075,7 @@ addToggle(visTab, "ESP Players", false, function(v)
 end)
 
 local plrTab = pages.Player
-addSlider(plrTab, "WalkSpeed", 16, 200, 20, function(v)
+addSlider(plrTab, "WalkSpeed", 16, 200, 16, function(v)
     S.walkSpeed = v
     local h = getHum(); if h then h.WalkSpeed = v end
 end)
@@ -990,6 +1089,10 @@ addSlider(plrTab, "Fly Speed", 20, 300, 55, function(v) S.flySpeed = v end)
 
 local miscTab = pages.Misc
 addToggle(miscTab, "Anti-AFK", true, function(v) S.antiAfk = v end)
+addToggle(miscTab, "Instant Prompts (HoldDuration=0)", false, function(v)
+    S.instantPrompts = v
+    if v then startInstantPrompts() end
+end)
 addButton(miscTab, "Copy Job ID", function() pcall(function() setclipboard(game.JobId) end) end)
 addButton(miscTab, "Clear log", function()
     pcall(function() if writefile then writefile(LOGF, "") end end)
@@ -1050,12 +1153,13 @@ task.spawn(function()
     while alive() do
         task.wait(1)
         if obsLbl then
-            obsLbl.Text = obsHooked and "BYPASS: HOOKED" or "BYPASS: waiting"
-            obsLbl.TextColor3 = obsHooked and C.on or C.bad
+            obsLbl.Text = BYP.armed > 0 and ("BYPASS: ARMED x" .. BYP.armed) or "BYPASS: waiting"
+            obsLbl.TextColor3 = BYP.armed > 0 and C.on or C.bad
         end
         if statusLbl then
             statusLbl.Text = "plots=" .. #getPlots() .. "  myplot=" .. (getMyPlot() and "ok" or "NO")
         end
+        if kickLbl then kickLbl.Text = "kick: " .. tostring(lastKick) end
     end
 end)
 task.spawn(function()
