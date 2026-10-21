@@ -1,14 +1,155 @@
 --[[=================================================================
-  VENICE HUB  ::  STEAL A BRAINROT  ::  v2.4
-  v2.4 changes vs v2.3:
-   * AC bypass now hooks ONE observeTag and STOPS (was hooking every
-     copy -> hooked:2 -> anti-cheat noticed -> instant kick)
-   * if the auto-exec bypass is present, hub switches itself to
-     acMode="off" so the two don't fight over the same function
-   * kick re-arm resets the scan properly
-   * bypass presence shown in diag
+  VENICE HUB  ::  STEAL A BRAINROT  ::  v3.0
+  ---------------------------------------------------------------
+  BYPASS IS INLINED AND RUNS FIRST. Single loadstring, nothing else.
+  * observeTag hooked ONCE and STOPPED (proven method)
+  * retries until the AC script exists, then stops
+  * Player.Kick hooked -> logged with caller + swallowed
+  * removal watchers + best-effort auto-rejoin
+  * everything timestamped to VeniceHub_log.txt
 =================================================================]]
 
+--=========== 0. LOG + BYPASS  (before anything else) =============
+local LOGF = "VeniceHub_log.txt"
+
+local function log(s)
+    local line = os.date("%H:%M:%S") .. "  " .. tostring(s)
+    pcall(print, "[VH] " .. line)
+    if not writefile then return end
+    local prev = ""
+    if readfile then local ok, d = pcall(readfile, LOGF); if ok and d then prev = d end end
+    local t = {}
+    for l in prev:gmatch("[^\n]+") do table.insert(t, l) end
+    table.insert(t, line)
+    while #t > 120 do table.remove(t, 1) end
+    pcall(writefile, LOGF, table.concat(t, "\n"))
+end
+
+local function gv() return getgenv and getgenv() or _G end
+gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
+local GEN = gv().VeniceHubGen
+local function alive() return gv().VeniceHubGen == GEN end
+
+log("=== v3.0 boot | place=" .. tostring(game.PlaceId) .. " job=" .. tostring(game.JobId) .. " ===")
+
+local LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Sendero098/Brrbr/refs/heads/main/B%C5%95r"))()'
+if queue_on_teleport then pcall(queue_on_teleport, LOADSTRING) end
+
+-- ---- 0a. observeTag hook (the actual bypass) --------------------
+local obsHooked = false
+
+local function armObserveTag()
+    if obsHooked then return true end
+    if not (getgc and hookfunction and newcclosure) then
+        log("MISSING getgc/hookfunction/newcclosure")
+        return false
+    end
+    for _, v in pairs(getgc(true)) do
+        if typeof(v) == "table" then
+            local fn = rawget(v, "observeTag")
+            if typeof(fn) == "function" then
+                if pcall(hookfunction, fn, newcclosure(function(...)
+                    return { Disconnect = function() end, disconnect = function() end }
+                end)) then
+                    obsHooked = true
+                    gv().VH_OBS = true
+                    log("observeTag HOOKED")
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+if not armObserveTag() then
+    task.spawn(function()
+        for i = 1, 240 do                       -- 60s at 0.25s
+            task.wait(0.25)
+            if armObserveTag() then return end
+        end
+        log("observeTag NEVER APPEARED")
+        while alive() do                        -- cheap long-shot re-check
+            task.wait(10)
+            if armObserveTag() then return end
+        end
+    end)
+end
+
+-- ---- 0b. kick hook: log + swallow -------------------------------
+local lastRejoin = 0
+local function tryRejoin(why)
+    if os.clock() - lastRejoin < 15 then return end
+    lastRejoin = os.clock()
+    log("auto-rejoin: " .. why)
+    task.delay(0.4, function()
+        pcall(function()
+            game:GetService("TeleportService"):Teleport(game.PlaceId, game:GetService("Players").LocalPlayer)
+        end)
+    end)
+end
+
+task.spawn(function()
+    local Players = game:GetService("Players")
+    local lp = Players.LocalPlayer
+    for _ = 1, 400 do if lp then break end; task.wait(0.1); lp = Players.LocalPlayer end
+    if not lp then log("kick hook: no LocalPlayer"); return end
+
+    if hookfunction and newcclosure and not gv().VH_KICK then
+        local old
+        local ok = pcall(function()
+            old = hookfunction(lp.Kick, newcclosure(function(self, msg)
+                local tb = ""
+                pcall(function()
+                    tb = debug.traceback("", 3):gsub("\n", " >> "):gsub("%s+", " ")
+                    if #tb > 500 then tb = tb:sub(1, 500) end
+                end)
+                log("*** KICK *** msg=[" .. tostring(msg) .. "] caller=" .. tb)
+                gv().VH_KICK = true
+                -- best effort: if the swallow doesn't hold, come back
+                task.delay(1.0, function() tryRejoin("kicked") end)
+                if gv().VH_SWALLOW ~= false then return end
+                if old then return old(self, msg) end
+            end))
+        end)
+        gv().VH_KICK = ok
+        log("kick hook armed: " .. tostring(ok))
+    end
+
+    pcall(function()
+        Players.PlayerRemoving:Connect(function(p)
+            if p == lp then log("*** REMOVED *** PlayerRemoving for us (no Kick signal)") end
+        end)
+        lp.AncestryChanged:Connect(function(_, parent)
+            if not parent then log("*** REMOVED *** LocalPlayer left the DataModel") end
+        end)
+    end)
+end)
+
+-- ---- 0c. who is the anti-cheat? (source scan, logged) -----------
+task.delay(4, function()
+    local ok = pcall(function()
+        if not getgc or not debug or not debug.info then return end
+        local counts, order = {}, {}
+        for _, v in pairs(getgc(true)) do
+            if type(v) == "function" then
+                local ok2, src = pcall(debug.info, v, "s")
+                if ok2 and type(src) == "string" and #src > 0 and src ~= "[C]" then
+                    if not counts[src] then order[#order + 1] = src end
+                    counts[src] = (counts[src] or 0) + 1
+                end
+            end
+        end
+        table.sort(order, function(a, b) return (counts[a] or 0) > (counts[b] or 0) end)
+        log("--- top lua sources in GC ---")
+        for i = 1, math.min(30, #order) do
+            log(string.format("  %4d  %s", counts[order[i]], order[i]))
+        end
+    end)
+    if not ok then log("source scan failed") end
+end)
+
+--===================== SERVICES ===================================
 local Players         = game:GetService("Players")
 local RunService      = game:GetService("RunService")
 local UIS             = game:GetService("UserInputService")
@@ -18,26 +159,11 @@ local Workspace       = game:GetService("Workspace")
 local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local VirtualUser     = game:GetService("VirtualUser")
-local LogService      = game:GetService("LogService")
 
 local LP  = Players.LocalPlayer
 local CAM = Workspace.CurrentCamera
 
-local LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Sendero098/Brrbr/refs/heads/main/B%C5%95r"))()'
-
-local function gv() return getgenv and getgenv() or _G end
-gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
-local GEN = gv().VeniceHubGen
-local function alive() return gv().VeniceHubGen == GEN end
-
-local KICKFILE = "VeniceHub_kicklog.txt"
-local HOPFILE  = "VeniceHub_hop.json"
-
 local S = {
-    antiCheat   = true,
-    acMode      = "single",      -- single (proven) | all | off
-    swallow     = true,
-    rejoinOnKick= false,
     autoSteal   = false,
     richestFirst= true,
     minValue    = 0,
@@ -62,8 +188,6 @@ local S = {
     antiAfk     = true,
     espBrainrots= false,
     espPlayers  = false,
-    fullbright  = false,
-    noFog       = false,
     infJump     = false,
     noclip      = false,
     fly         = false,
@@ -81,140 +205,12 @@ local S = {
     hopMax      = 45,
 }
 
--- the auto-exec bypass already neutered observeTag -> don't duplicate it
-if gv().VH_BYPASS_AT then S.acMode = "off" end
-
 local conns = {}
 local function bind(c) table.insert(conns, c); return c end
 
 local statusLbl, diagLabel, GUI
-local lastKick, kickCount, swallowed = "none", 0, 0
-local kickLog = {}
 
---===================== FILE HELPERS ===============================
-local function fsRead(p)
-    if not readfile then return nil end
-    local ok, d = pcall(function()
-        if isfile and not isfile(p) then return nil end
-        return readfile(p)
-    end)
-    return ok and d or nil
-end
-local function fsWrite(p, txt) if writefile then pcall(writefile, p, txt) end end
-local function fsAppend(p, line)
-    if not writefile then return end
-    local prev = fsRead(p) or ""
-    local lines = {}
-    for l in prev:gmatch("[^\n]+") do table.insert(lines, l) end
-    table.insert(lines, line)
-    while #lines > 70 do table.remove(lines, 1) end
-    fsWrite(p, table.concat(lines, "\n"))
-end
-
---===================== KICK FORENSICS =============================
-local function noteKick(tag, msg, tb)
-    kickCount = kickCount + 1
-    lastKick  = tostring(msg)
-    local stamp = os.date("%Y-%m-%d %H:%M:%S")
-    local head = string.format("[%s] %s | %s | place=%s job=%s",
-        stamp, tag, lastKick, tostring(game.PlaceId), tostring(game.JobId))
-    table.insert(kickLog, head)
-    if tb and tb ~= "" then table.insert(kickLog, "   caller: " .. tb) end
-    while #kickLog > 40 do table.remove(kickLog, 1) end
-    fsAppend(KICKFILE, head)
-    if tb and tb ~= "" then fsAppend(KICKFILE, "   caller: " .. tb) end
-    pcall(print, "[VeniceHub][KICK] " .. head)
-    if statusLbl then statusLbl.Text = "KICK(" .. kickCount .. "): " .. lastKick end
-end
-
-local function trace()
-    local ok, t = pcall(debug.traceback, "", 3)
-    if not ok or not t then return "" end
-    t = t:gsub("\n", " >> "):gsub("%s+", " ")
-    if #t > 400 then t = t:sub(1, 400) .. "..." end
-    return t
-end
-
-local kickHookDone = false
-local function installKickHook()
-    if kickHookDone then return true end
-    if gv().VH_KICK then kickHookDone = true; return true end
-    if not hookfunction then return false end
-    local wrap = newcclosure or function(f) return f end
-    local ok = pcall(function()
-        local old
-        old = hookfunction(LP.Kick, wrap(function(self, msg)
-            noteKick("LP.Kick", msg, trace())
-            if S.swallow then
-                swallowed = swallowed + 1
-                if S.rejoinOnKick then
-                    task.delay(0.4, function()
-                        pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
-                    end)
-                else
-                    task.delay(0.6, function()
-                        pcall(function() acReset() end)
-                        if S.antiCheat then pcall(function() acScanOnce() end) end
-                    end)
-                end
-                return
-            end
-            if old then return old(self, msg) end
-        end))
-    end)
-    kickHookDone = ok
-    return ok
-end
-
---===================== AC BYPASS ==================================
-local acHooked, acScans = 0, 0
-local acSeen = setmetatable({}, { __mode = "k" })
-
-local function acStub()
-    local wrap = newcclosure or function(f) return f end
-    return wrap(function(...)
-        return { Disconnect = function() end, disconnect = function() end, Connected = true }
-    end)
-end
-
-function acReset()
-    acSeen = setmetatable({}, { __mode = "k" })
-    acHooked = 0
-end
-
-function acScanOnce()
-    if not (getgc and hookfunction) then return end
-    if S.acMode == "off" then return end
-    if S.acMode == "single" and acHooked >= 1 then return end
-    for _, v in pairs(getgc(true)) do
-        if type(v) == "table" and acSeen[v] == nil then
-            local fn = rawget(v, "observeTag")
-            if type(fn) == "function" then
-                acSeen[v] = true
-                if pcall(hookfunction, fn, acStub()) then
-                    acHooked = acHooked + 1
-                    if S.acMode == "single" then return end
-                end
-            end
-        end
-    end
-end
-
-local acThread
-local function startAntiCheatBypass()
-    if acThread then return end
-    acThread = task.spawn(function()
-        local t0 = os.clock()
-        while S.antiCheat and alive() do
-            acScans = acScans + 1
-            pcall(acScanOnce)
-            if os.clock() - t0 > 30 then task.wait(3) else task.wait(0.15) end
-        end
-        acThread = nil
-    end)
-end
-
---===================== SMALL UTILS ================================
+--===================== UTILS ======================================
 local function mk(class, props, parent)
     local ok, inst = pcall(Instance.new, class)
     if not ok or not inst then return nil end
@@ -226,12 +222,8 @@ local function corner(o, r) if o then mk("UICorner", { CornerRadius = UDim.new(0
 local function stroke(o, c, t, tr)
     if o then mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o) end
 end
-
 local function parentGui()
-    if gethui then
-        local ok, h = pcall(gethui)
-        if ok and h then return h end
-    end
+    if gethui then local ok, h = pcall(gethui); if ok and h then return h end end
     local ok, cg = pcall(function() return game:GetService("CoreGui") end)
     if ok and cg then return cg end
     return LP:WaitForChild("PlayerGui")
@@ -256,14 +248,12 @@ local function tpTo(pos, yOff, safe)
     pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
 end
 
---===================== WORLD / PLOT ===============================
+--===================== WORLD ======================================
 local function getPlots()
     local p = Workspace:FindFirstChild("Plots")
     if p then return p:GetChildren() end
     for _, c in ipairs(Workspace:GetChildren()) do
-        if c:IsA("Folder") and c:FindFirstChild("AnimalPodiums", true) then
-            return c:GetChildren()
-        end
+        if c:IsA("Folder") and c:FindFirstChild("AnimalPodiums", true) then return c:GetChildren() end
     end
     return {}
 end
@@ -281,8 +271,7 @@ local myPlotCache, myPlotTick = nil, 0
 local function isMyPlot(plot)
     local yb = plot:FindFirstChild("YourBase", true)
     if yb then
-        if yb:IsA("BoolValue") then
-            if yb.Value then return true end
+        if yb:IsA("BoolValue") then if yb.Value then return true end
         elseif yb:IsA("GuiObject") or yb:IsA("Highlight") or yb:IsA("BillboardGui") then
             if yb.Enabled then return true end
         end
@@ -392,7 +381,7 @@ local function scanTargets(includeMine)
                                     table.insert(out, {
                                         pod = pod, prompt = prompt, value = val, pos = pos,
                                         name = (prompt.ObjectText ~= "" and prompt.ObjectText) or (body and body.Name) or "?",
-                                        plot = plot, body = body,
+                                        plot = plot,
                                     })
                                 end
                             end
@@ -406,7 +395,7 @@ local function scanTargets(includeMine)
     return out
 end
 
---===================== PROMPT FIRING ==============================
+--===================== PROMPT / STEAL =============================
 local lastFired = setmetatable({}, { __mode = "k" })
 
 local function inRange(p)
@@ -437,33 +426,29 @@ local function firePrompt(p, force)
     if fireproximityprompt then
         if pcall(fireproximityprompt, p) then return true end
     end
-    local ok2 = pcall(function() p:InputHoldBegin(); task.wait(0.06); p:InputHoldEnd() end)
-    return ok2
+    return pcall(function() p:InputHoldBegin(); task.wait(0.06); p:InputHoldEnd() end)
 end
 
---===================== STEAL ======================================
 local function doSteal(t)
     if not t or not t.prompt or not t.prompt.Parent then return false end
     local hrp = getHRP(); if not hrp then return false end
     local startPos = hrp.Position
-    local anchor = t.pos
-    if not anchor then return false end
+    if not t.pos then return false end
 
     if not inRange(t.prompt) then
-        tpTo(anchor, 2)
+        tpTo(t.pos, 2)
         task.wait(S.settleTime)
     end
 
     if not S.tpOnly then
         local ok = firePrompt(t.prompt)
         if not ok then
-            tpTo(anchor, 1.5); task.wait(0.12)
-            ok = firePrompt(t.prompt, true)
+            tpTo(t.pos, 1.5); task.wait(0.12)
+            firePrompt(t.prompt, true)
         end
         if S.verify then
             task.wait(S.holdTime)
-            local still = t.prompt.Parent and t.prompt.Enabled ~= false
-            if still and S.retryOnce then
+            if t.prompt.Parent and t.prompt.Enabled ~= false and S.retryOnce then
                 task.wait(0.12)
                 firePrompt(t.prompt, true)
             end
@@ -484,40 +469,35 @@ local function startAutoSteal()
     if stealThread then return end
     stealThread = task.spawn(function()
         while S.autoSteal and alive() do
-            local ok, err = pcall(function()
+            pcall(function()
                 local t = scanTargets(false)[1]
                 if t then doSteal(t) else task.wait(0.4) end
             end)
-            if not ok then warn("[VeniceHub] steal: " .. tostring(err)) end
             task.wait(0.05)
         end
         stealThread = nil
     end)
 end
 
---===================== AUTO LOCK BASE =============================
+--===================== AUTO LOCK ==================================
 local function findLockButton()
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then return nil end
     for _, d in ipairs(pg:GetDescendants()) do
         if (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible then
             local t = (d.Text or ""):lower()
-            if (t:find("lock") and not t:find("unlock")) or d.Name:lower():find("lock") then
-                return d
-            end
+            if (t:find("lock") and not t:find("unlock")) or d.Name:lower():find("lock") then return d end
         end
     end
     return nil
 end
-
 local function clickBtn(b)
     if not b then return false end
-    local ok = pcall(function() b:Activate() end)
+    pcall(function() b:Activate() end)
     pcall(function() b.MouseButton1Click:Fire() end)
     pcall(function() b.Activated:Fire() end)
-    return ok
+    return true
 end
-
 local lockThread
 local function startAutoLock()
     if lockThread then return end
@@ -525,12 +505,7 @@ local function startAutoLock()
         while S.autoLock and alive() do
             pcall(function()
                 local b = findLockButton()
-                if b then
-                    clickBtn(b)
-                    if statusLbl then statusLbl.Text = "auto-lock: clicked " .. b.Name end
-                else
-                    if statusLbl then statusLbl.Text = "auto-lock: no Lock button found" end
-                end
+                if b then clickBtn(b); log("auto-lock clicked " .. b.Name) end
             end)
             task.wait(math.max(5, S.lockEvery))
         end
@@ -538,18 +513,16 @@ local function startAutoLock()
     end)
 end
 
---===================== SERVER SCANNER / HOP =======================
+--===================== SERVER HOP =================================
 local function serverList()
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId)
     local ok, res = pcall(function() return HttpService:JSONDecode(game:HttpGet(url)) end)
     if not ok or type(res) ~= "table" or type(res.data) ~= "table" then return {} end
     return res.data
 end
-
 local function pickNextServer(visited)
-    local list = serverList()
     local best, bestN = nil, math.huge
-    for _, s in ipairs(list) do
+    for _, s in ipairs(serverList()) do
         if s.id ~= game.JobId and not (visited and visited[s.id]) then
             local n  = tonumber(s.playing) or 99
             local mx = tonumber(s.maxPlayers) or 8
@@ -558,53 +531,35 @@ local function pickNextServer(visited)
     end
     return best
 end
-
+local HOPFILE = "VeniceHub_hop.json"
 local function loadHop()
-    local d = fsRead(HOPFILE)
+    local d
+    if readfile then local ok, v = pcall(readfile, HOPFILE); if ok then d = v end end
     if not d or d == "" then return nil end
     local ok, t = pcall(HttpService.JSONDecode, HttpService, d)
-    if ok and type(t) == "table" then return t end
-    return nil
+    return (ok and type(t) == "table") and t or nil
 end
 local function saveHop(t)
-    if not t then fsWrite(HOPFILE, "") return end
-    local vis, i = {}, 0
-    for k in pairs(t.visited or {}) do
-        i = i + 1
-        if i <= 60 then vis[k] = true end
-    end
-    t.visited = vis
-    fsWrite(HOPFILE, HttpService:JSONEncode(t))
+    if not writefile then return end
+    pcall(writefile, HOPFILE, t and HttpService:JSONEncode(t) or "")
 end
-
 local function bestInServer()
     local list = scanTargets(false)
     local best = nil
-    for _, t in ipairs(list) do
-        if not best or t.value > best.value then best = t end
-    end
+    for _, t in ipairs(list) do if not best or t.value > best.value then best = t end end
     return best, list
 end
-
 local function doHop(st)
     st = st or { auto = true, tries = 0, target = S.scanTarget, visited = {} }
-    st.tries  = (st.tries or 0) + 1
+    st.tries = (st.tries or 0) + 1
     st.visited = st.visited or {}
     st.visited[game.JobId] = true
-    if st.tries > (S.hopMax or 45) then
-        saveHop(nil)
-        if statusLbl then statusLbl.Text = "hop: gave up after " .. st.tries .. " servers" end
-        return false
-    end
+    if st.tries > (S.hopMax or 45) then saveHop(nil); return false end
     local nxt = pickNextServer(st.visited)
-    if not nxt then
-        saveHop(nil)
-        if statusLbl then statusLbl.Text = "hop: no servers left" end
-        return false
-    end
+    if not nxt then saveHop(nil); return false end
     saveHop(st)
     if queue_on_teleport then pcall(queue_on_teleport, LOADSTRING) end
-    if statusLbl then statusLbl.Text = "hop " .. st.tries .. "/" .. (S.hopMax or 45) .. " ..." end
+    log("hopping -> " .. nxt .. " (" .. st.tries .. ")")
     task.wait(0.4)
     TeleportService:TeleportToPlaceInstance(game.PlaceId, nxt, LP)
     return true
@@ -628,7 +583,7 @@ local function nearestPlayer(range)
     local best, bestD = nil, range or 60
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character then
-            local h   = p.Character:FindFirstChild("HumanoidRootPart")
+            local h = p.Character:FindFirstChild("HumanoidRootPart")
             local hum = p.Character:FindFirstChildOfClass("Humanoid")
             if h and hum and hum.Health > 0 then
                 local d = (h.Position - hrp.Position).Magnitude
@@ -638,7 +593,6 @@ local function nearestPlayer(range)
     end
     return best, bestD
 end
-
 local lastGearFire = 0
 local function gearTick(dt)
     if not S.gearAim then return end
@@ -649,8 +603,7 @@ local function gearTick(dt)
     if not target then return end
     local flat = Vector3.new(target.Position.X, hrp.Position.Y, target.Position.Z)
     if (flat - hrp.Position).Magnitude > 0.2 then
-        local want = CFrame.lookAt(hrp.Position, flat)
-        hrp.CFrame = hrp.CFrame:Lerp(want, math.clamp(S.gearSmooth * 60 * dt, 0, 1))
+        hrp.CFrame = hrp.CFrame:Lerp(CFrame.lookAt(hrp.Position, flat), math.clamp(S.gearSmooth * 60 * dt, 0, 1))
     end
     if S.gearAutoFire and dist <= S.gearRange and (os.clock() - lastGearFire) > S.gearFireCd then
         lastGearFire = os.clock()
@@ -661,9 +614,7 @@ end
 --===================== ESP ========================================
 local espFolder
 local function ensureEspFolder()
-    if not espFolder or not espFolder.Parent then
-        espFolder = mk("Folder", { Name = "VeniceESP" }, Workspace)
-    end
+    if not espFolder or not espFolder.Parent then espFolder = mk("Folder", { Name = "VeniceESP" }, Workspace) end
     return espFolder
 end
 local brESP, plrESP = {}, {}
@@ -675,28 +626,24 @@ local function makeBrainrotESP(model, name)
     local part = model:IsA("BasePart") and model or model:FindFirstChildWhichIsA("BasePart", true)
     if not part then return end
     local hl = mk("Highlight", {
-        FillColor = ESP_FILL, OutlineColor = ESP_FILL,
-        FillTransparency = 0.65, OutlineTransparency = 0.15,
-        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        FillColor = ESP_FILL, OutlineColor = ESP_FILL, FillTransparency = 0.65,
+        OutlineTransparency = 0.15, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
     }, ensureEspFolder())
     local bb = mk("BillboardGui", {
         Size = UDim2.new(0, 150, 0, 34), StudsOffset = Vector3.new(0, 3, 0),
         AlwaysOnTop = true, MaxDistance = 1000,
     }, part)
     local txt = mk("TextLabel", {
-        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-        Text = name or model.Name, TextColor3 = Color3.new(1,1,1),
-        Font = Enum.Font.GothamBold, TextSize = 12,
+        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = name or model.Name,
+        TextColor3 = Color3.new(1,1,1), Font = Enum.Font.GothamBold, TextSize = 12,
         TextStrokeTransparency = 0.4, TextStrokeColor3 = Color3.new(0,0,0),
     }, bb)
-    brESP[model] = { hl = hl, bb = bb, txt = txt, part = part }
+    brESP[model] = { hl = hl, bb = bb, txt = txt }
 end
-
 local function clearBrainrotESP()
     for _, d in pairs(brESP) do pcall(function() d.hl:Destroy(); d.bb:Destroy() end) end
     brESP = {}
 end
-
 local function refreshBrainrotESP()
     local live = {}
     local my = getMyPlot()
@@ -705,22 +652,20 @@ local function refreshBrainrotESP()
         if podiums then
             for _, pod in ipairs(podiums:GetChildren()) do
                 local prompt = getPrompt(pod)
-                if prompt then
-                    local model = findBrainrotModel(pod)
-                    if model then
-                        live[model] = true
-                        makeBrainrotESP(model, prompt.ObjectText)
-                        local d = brESP[model]
-                        if d then
-                            if d.hl.Parent ~= ensureEspFolder() then d.hl.Parent = ensureEspFolder() end
-                            local val = getValue(pod) + getValue(model)
-                            local tag = (plot == my) and "MINE" or "STEAL"
-                            d.txt.Text = string.format("%s\n%s  %s", prompt.ObjectText,
-                                tag, val > 0 and ("$" .. tostring(math.floor(val))) or "")
-                            d.txt.TextColor3 = (plot == my) and ESP_GOOD or Color3.new(1,1,1)
-                            d.hl.FillColor = (plot == my) and ESP_GOOD or ESP_FILL
-                            d.hl.OutlineColor = d.hl.FillColor
-                        end
+                local model = prompt and findBrainrotModel(pod)
+                if model then
+                    live[model] = true
+                    makeBrainrotESP(model, prompt.ObjectText)
+                    local d = brESP[model]
+                    if d then
+                        if d.hl.Parent ~= ensureEspFolder() then d.hl.Parent = ensureEspFolder() end
+                        local val = getValue(pod) + getValue(model)
+                        d.txt.Text = string.format("%s\n%s  %s", prompt.ObjectText,
+                            (plot == my) and "MINE" or "STEAL",
+                            val > 0 and ("$" .. tostring(math.floor(val))) or "")
+                        d.txt.TextColor3 = (plot == my) and ESP_GOOD or Color3.new(1,1,1)
+                        d.hl.FillColor = (plot == my) and ESP_GOOD or ESP_FILL
+                        d.hl.OutlineColor = d.hl.FillColor
                     end
                 end
             end
@@ -733,7 +678,6 @@ local function refreshBrainrotESP()
         end
     end
 end
-
 local function buildPlayerESP()
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character and not plrESP[p] then
@@ -750,7 +694,7 @@ local function clearPlayerESP()
     plrESP = {}
 end
 
---===================== CHARACTER LOOPS ============================
+--===================== CHARACTER ==================================
 bind(RunService.Stepped:Connect(function()
     if not S.noclip or not alive() then return end
     local c = getChar(); if not c then return end
@@ -758,7 +702,6 @@ bind(RunService.Stepped:Connect(function()
         if p:IsA("BasePart") then p.CanCollide = false end
     end
 end))
-
 bind(UIS.JumpRequest:Connect(function()
     if not S.infJump then return end
     local hum = getHum()
@@ -860,175 +803,45 @@ bind(LP.Idled:Connect(function()
     end)
 end))
 
-bind(LogService.MessageOut:Connect(function(msg, typ)
-    local m = tostring(msg)
-    local low = m:lower()
-    if low:find("kick") or low:find("detect") or low:find("suspi") then
-        table.insert(kickLog, "LOG  " .. m)
-        fsAppend(KICKFILE, "LOG  " .. m)
-    end
-end))
-
---===================== DIAG / DUMP ================================
+--===================== DIAG =======================================
 local function diagnose()
     local L = {}
     local function out(s) table.insert(L, s) end
-
-    out("=== VENICE HUB DIAG v2.4 ===")
+    out("=== VENICE HUB DIAG v3.0 ===")
     out("time      = " .. os.date("%H:%M:%S"))
     out("place     = " .. tostring(game.PlaceId) .. "  ver=" .. tostring(game.PlaceVersion))
     out("job       = " .. tostring(game.JobId))
-    out("executor  = hookfunction:" .. tostring(hookfunction ~= nil)
-        .. " getgc:" .. tostring(getgc ~= nil)
-        .. " newcclosure:" .. tostring(newcclosure ~= nil)
-        .. " writefile:" .. tostring(writefile ~= nil)
-        .. " queue:" .. tostring(queue_on_teleport ~= nil))
-    out("bypass    = autoexec:" .. tostring(gv().VH_BYPASS_AT ~= nil)
-        .. " obsHooked:" .. tostring(gv().VH_OBS == true)
-        .. " kickHooked:" .. tostring(gv().VH_KICK == true))
-    out("anticheat = hooked:" .. acHooked .. " scans:" .. acScans
-        .. " mode:" .. S.acMode .. " kickhook:" .. tostring(kickHookDone))
-    out("kicks     = " .. kickCount .. "  swallowed:" .. swallowed .. "  last: " .. lastKick)
+    out("bypass    = obsHooked:" .. tostring(obsHooked) .. " kickHook:" .. tostring(gv().VH_KICK == true))
     out("gui parent= " .. (GUI and GUI.Parent and GUI.Parent:GetFullName() or "none"))
-    out("mode      = legitPrompt:" .. tostring(S.legitPrompt)
-        .. " instantPrompts:" .. tostring(S.instantPrompts) .. " tpOnly:" .. tostring(S.tpOnly))
-
-    out("--- world ---")
-    out("workspace kids = " .. #Workspace:GetChildren())
-    local plots = getPlots()
-    out("plots = " .. #plots)
-    local my = getMyPlot()
-    out("my plot = " .. (my and my:GetFullName() or "NOT FOUND"))
-    out("base drop = " .. tostring(getBaseDrop()))
-    out("lock btn  = " .. (findLockButton() and findLockButton():GetFullName() or "NOT FOUND"))
-
-    out("--- targets ---")
+    out("world     = plots:" .. #getPlots() .. "  myplot:" .. (getMyPlot() and "yes" or "NO"))
     local targets = scanTargets(false)
     out("stealable = " .. #targets)
-    local hrp = getHRP()
-    for i = 1, math.min(3, #targets) do
+    for i = 1, math.min(5, #targets) do
         local t = targets[i]
-        local p = t.prompt
-        out(string.format("T%d  %s", i, p:GetFullName()))
-        out(string.format("   hold=%.2f  maxDist=%.1f  enabled=%s",
-            p.HoldDuration, p.MaxActivationDistance, tostring(p.Enabled)))
-        out(string.format("   action=%s  object=%s  value=%d", tostring(p.ActionText), tostring(p.ObjectText), t.value))
-        if hrp then out(string.format("   dist=%.1f", (t.pos - hrp.Position).Magnitude)) end
+        out(string.format("  %d. %-28s $%d", i, t.name, math.floor(t.value)))
     end
-
-    out("--- persisted log (all sessions) ---")
-    local prev = fsRead(KICKFILE)
-    if prev and prev ~= "" then
-        local i = 0
-        for l in prev:gmatch("[^\n]+") do
-            i = i + 1
-            if i > 14 then break end
-            out("  " .. l)
+    out("--- log tail ---")
+    if readfile then
+        local ok, d = pcall(readfile, LOGF)
+        if ok and d then
+            local lines = {}
+            for l in d:gmatch("[^\n]+") do table.insert(lines, l) end
+            for i = math.max(1, #lines - 20), #lines do out("  " .. lines[i]) end
         end
-    else
-        out("(none)")
     end
     out("=== END ===")
-    return L
-end
-
-local function deepDump()
-    local L = {}
-    local function out(s) table.insert(L, s) end
-    out("=== VENICE HUB DEEP DUMP v2.4 ===")
-    out("place=" .. tostring(game.PlaceId) .. " job=" .. tostring(game.JobId))
-
-    out("--- leaderstats ---")
-    local ls = LP:FindFirstChild("leaderstats")
-    if ls then
-        for _, v in ipairs(ls:GetChildren()) do out("  " .. v.Name .. " = " .. tostring(v.Value)) end
-    else out("  (none)") end
-
-    out("--- backpack tools ---")
-    local bp = LP:FindFirstChild("Backpack")
-    if bp then
-        for _, t in ipairs(bp:GetChildren()) do
-            if t:IsA("Tool") then out("  TOOL " .. t.Name) end
-        end
-    end
-    local ch = LP.Character
-    if ch then
-        for _, t in ipairs(ch:GetChildren()) do
-            if t:IsA("Tool") then out("  EQUIPPED " .. t.Name) end
-        end
-    end
-
-    out("--- visible gui buttons ---")
-    local pg = LP:FindFirstChild("PlayerGui")
-    if pg then
-        local n = 0
-        for _, d in ipairs(pg:GetDescendants()) do
-            if (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible then
-                n = n + 1
-                if n <= 40 then
-                    out(string.format("  %s [%s] text=%q", d:GetFullName(), d.ClassName, tostring(d.Text)))
-                end
-            end
-        end
-    end
-
-    out("--- first target podium detail ---")
-    local t = scanTargets(false)[1]
-    if t then
-        out("  prompt " .. t.prompt:GetFullName())
-        for k, v in pairs(t.prompt:GetAttributes()) do out("    P.attr " .. k .. " = " .. tostring(v)) end
-        out("  podium " .. t.pod:GetFullName())
-        for k, v in pairs(t.pod:GetAttributes()) do out("    O.attr " .. k .. " = " .. tostring(v)) end
-        local n = 0
-        for _, d in ipairs(t.pod:GetDescendants()) do
-            n = n + 1
-            if n > 60 then out("    ...") break end
-            local attrs = {}
-            for k, v in pairs(d:GetAttributes()) do table.insert(attrs, k .. "=" .. tostring(v)) end
-            out(string.format("    %s [%s] %s", d:GetFullName(), d.ClassName, table.concat(attrs, " ")))
-        end
-    else
-        out("  (no target in this server)")
-    end
-
-    out("--- all brainrot names in server ---")
-    local names = {}
-    for _, plot in ipairs(getPlots()) do
-        local podiums = plot:FindFirstChild("AnimalPodiums")
-        if podiums then
-            for _, pod in ipairs(podiums:GetChildren()) do
-                local p = getPrompt(pod)
-                if p and p.ObjectText ~= "" then table.insert(names, p.ObjectText) end
-            end
-        end
-    end
-    out("  " .. (#names > 0 and table.concat(names, ", ") or "(none)"))
-    out("=== END DUMP ===")
     return table.concat(L, "\n")
 end
 
-local function runDiagnose()
-    local ok, L = pcall(diagnose)
-    if not ok then
-        if diagLabel then diagLabel.Text = "diagnose error:\n" .. tostring(L) end
-        return
-    end
-    local txt = table.concat(L, "\n")
+local function showDiag()
+    local ok, txt = pcall(diagnose)
+    if not ok then txt = "diag error: " .. tostring(txt) end
     if diagLabel then diagLabel.Text = txt end
-    if statusLbl then statusLbl.Text = "diag: " .. #L .. " lines (copied)" end
     pcall(function() if setclipboard then setclipboard(txt) end end)
     return txt
 end
 
-local function runDump()
-    local ok, txt = pcall(deepDump)
-    if not ok then if diagLabel then diagLabel.Text = "dump error: " .. tostring(txt) end return end
-    if diagLabel then diagLabel.Text = txt end
-    if statusLbl then statusLbl.Text = "deep dump copied (" .. #txt .. " chars)" end
-    pcall(function() if setclipboard then setclipboard(txt) end end)
-end
-
---===================== THEME ======================================
+--===================== UI =========================================
 local C = {
     bg = Color3.fromRGB(15,15,19), panel = Color3.fromRGB(23,23,29),
     row = Color3.fromRGB(33,33,42), accent = Color3.fromRGB(126,92,255),
@@ -1036,7 +849,6 @@ local C = {
     dim = Color3.fromRGB(148,148,165), off = Color3.fromRGB(62,62,74),
 }
 
---===================== BUILD UI ===================================
 local pg = parentGui()
 for _, parent in ipairs({ pg, LP:FindFirstChild("PlayerGui") }) do
     local old = parent and parent:FindFirstChild("VeniceHub_SAB")
@@ -1047,6 +859,7 @@ GUI = mk("ScreenGui", {
     Name = "VeniceHub_SAB", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, pg)
+log("gui parent = " .. (GUI.Parent and GUI.Parent:GetFullName() or "nil"))
 
 local vp = CAM and CAM.ViewportSize or Vector2.new(400, 800)
 local W = math.clamp(math.floor(vp.X * 0.88), 260, 340)
@@ -1054,42 +867,27 @@ local H = math.clamp(math.floor(vp.Y * 0.62), 320, 460)
 
 local main = mk("Frame", {
     Size = UDim2.new(0, W, 0, H), Position = UDim2.new(0.5, -math.floor(W/2), 0, 50),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0, Visible = true,
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
 }, GUI)
 corner(main, 14); stroke(main, Color3.fromRGB(80,70,130), 1.5, 0.35)
 
-local titleBar = mk("Frame", {
-    Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel, BorderSizePixel = 0,
-}, main)
+local titleBar = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, main)
 corner(titleBar, 14)
-
 mk("TextLabel", {
-    Size = UDim2.new(1, -120, 0, 18), Position = UDim2.new(0, 12, 0, 4),
-    BackgroundTransparency = 1, Text = "VENICE HUB  v2.4",
-    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
+    Size = UDim2.new(1, -120, 0, 18), Position = UDim2.new(0, 12, 0, 4), BackgroundTransparency = 1,
+    Text = "VENICE HUB  v3.0", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, titleBar)
-
 statusLbl = mk("TextLabel", {
-    Size = UDim2.new(1, -120, 0, 14), Position = UDim2.new(0, 12, 0, 22),
-    BackgroundTransparency = 1, Text = "building...",
-    TextColor3 = C.dim, Font = Enum.Font.GothamMedium, TextSize = 10,
+    Size = UDim2.new(1, -120, 0, 14), Position = UDim2.new(0, 12, 0, 22), BackgroundTransparency = 1,
+    Text = "building...", TextColor3 = C.dim, Font = Enum.Font.GothamMedium, TextSize = 10,
     TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 }, titleBar)
-
-local cashLbl = mk("TextLabel", {
-    Size = UDim2.new(0, 66, 0, 20), Position = UDim2.new(1, -102, 0, 10),
-    BackgroundTransparency = 1, Text = "", TextColor3 = C.on,
-    Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right,
-}, titleBar)
-
 local minBtn = mk("TextButton", {
     Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -66, 0, 6),
-    BackgroundColor3 = C.row, Text = "-", TextColor3 = C.text,
-    Font = Enum.Font.GothamBold, TextSize = 16,
+    BackgroundColor3 = C.row, Text = "-", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 16,
 }, titleBar)
 corner(minBtn, 8)
-
 local closeBtn = mk("TextButton", {
     Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -34, 0, 6),
     BackgroundColor3 = Color3.fromRGB(180,50,60), Text = "X", TextColor3 = Color3.new(1,1,1),
@@ -1102,12 +900,10 @@ local tabBar = mk("Frame", {
     BackgroundColor3 = C.panel, BorderSizePixel = 0,
 }, main)
 corner(tabBar, 9)
-
 local tabScroll = mk("ScrollingFrame", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
     ScrollBarThickness = 0, CanvasSize = UDim2.new(0,0,0,0),
-    AutomaticCanvasSize = Enum.AutomaticSize.X,
-    ScrollingDirection = Enum.ScrollingDirection.X,
+    AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
 }, tabBar)
 mk("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
@@ -1116,37 +912,31 @@ mk("UIListLayout", {
 mk("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, tabScroll)
 
 local content = mk("Frame", {
-    Size = UDim2.new(1, -16, 1, -126), Position = UDim2.new(0, 8, 0, 86),
-    BackgroundTransparency = 1,
+    Size = UDim2.new(1, -16, 1, -126), Position = UDim2.new(0, 8, 0, 86), BackgroundTransparency = 1,
 }, main)
 
 local TABS = { "Main", "Steal", "Scan", "Gear", "Vis", "Player", "Misc" }
 local pages, tabBtns = {}, {}
-
 local function makePage(name)
     local sf = mk("ScrollingFrame", {
-        Name = name, Size = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent,
-        CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        Visible = false, ScrollingDirection = Enum.ScrollingDirection.Y,
+        Name = name, Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(0,0,0,0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
     }, content)
     mk("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, sf)
     mk("UIPadding", { PaddingBottom = UDim.new(0, 14) }, sf)
     pages[name] = sf
     return sf
 end
-
 local function selectTab(name)
     for n, p in pairs(pages) do p.Visible = (n == name) end
     for n, b in pairs(tabBtns) do b.BackgroundColor3 = (n == name) and C.accent or C.row end
 end
-
 for i, name in ipairs(TABS) do
     local b = mk("TextButton", {
-        Size = UDim2.new(0, 62, 0, 26), BackgroundColor3 = C.row,
-        Text = name, TextColor3 = C.text, Font = Enum.Font.GothamBold,
-        TextSize = 12, LayoutOrder = i, BorderSizePixel = 0,
+        Size = UDim2.new(0, 62, 0, 26), BackgroundColor3 = C.row, Text = name, TextColor3 = C.text,
+        Font = Enum.Font.GothamBold, TextSize = 12, LayoutOrder = i, BorderSizePixel = 0,
     }, tabScroll)
     corner(b, 7)
     tabBtns[name] = b
@@ -1156,25 +946,20 @@ end
 selectTab("Main")
 
 local function row(parent, h)
-    local r = mk("Frame", {
-        Size = UDim2.new(1, 0, 0, h or 38), BackgroundColor3 = C.row, BorderSizePixel = 0,
-    }, parent)
+    local r = mk("Frame", { Size = UDim2.new(1, 0, 0, h or 38), BackgroundColor3 = C.row, BorderSizePixel = 0 }, parent)
     corner(r, 9)
     return r
 end
-
 local function addToggle(parent, label, default, cb)
     local r = row(parent, 38)
     mk("TextLabel", {
-        Size = UDim2.new(1, -76, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-        BackgroundTransparency = 1, Text = label, TextColor3 = C.text,
-        Font = Enum.Font.GothamMedium, TextSize = 13,
+        Size = UDim2.new(1, -76, 1, 0), Position = UDim2.new(0, 12, 0, 0), BackgroundTransparency = 1,
+        Text = label, TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
     }, r)
     local btn = mk("TextButton", {
         Size = UDim2.new(0, 48, 0, 22), Position = UDim2.new(1, -60, 0.5, -11),
-        BackgroundColor3 = default and C.on or C.off, Text = "", AutoButtonColor = false,
-        BorderSizePixel = 0,
+        BackgroundColor3 = default and C.on or C.off, Text = "", AutoButtonColor = false, BorderSizePixel = 0,
     }, r)
     corner(btn, 11)
     local knob = mk("Frame", {
@@ -1194,25 +979,21 @@ local function addToggle(parent, label, default, cb)
     btn.MouseButton1Click:Connect(function() set(not state) end)
     return { set = set, get = function() return state end }
 end
-
 local function addButton(parent, label, cb, color)
     local b = mk("TextButton", {
-        Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = color or C.row,
-        BorderSizePixel = 0, Text = label, TextColor3 = C.text,
-        Font = Enum.Font.GothamBold, TextSize = 13,
+        Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = color or C.row, BorderSizePixel = 0,
+        Text = label, TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13,
     }, parent)
     corner(b, 9)
     b.MouseButton1Click:Connect(function() task.spawn(cb) end)
     return b
 end
-
 local function addSlider(parent, label, min, max, default, cb)
     local r = row(parent, 54)
     local t = mk("TextLabel", {
-        Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 12, 0, 6),
-        BackgroundTransparency = 1, Text = label .. ": " .. tostring(default),
-        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 12, 0, 6), BackgroundTransparency = 1,
+        Text = label .. ": " .. tostring(default), TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
     }, r)
     local track = mk("Frame", {
         Size = UDim2.new(1, -24, 0, 8), Position = UDim2.new(0, 12, 0, 36),
@@ -1220,13 +1001,11 @@ local function addSlider(parent, label, min, max, default, cb)
     }, r)
     corner(track, 4)
     local fill = mk("Frame", {
-        Size = UDim2.new((default - min) / (max - min), 0, 1, 0),
-        BackgroundColor3 = C.accent, BorderSizePixel = 0,
+        Size = UDim2.new((default - min) / (max - min), 0, 1, 0), BackgroundColor3 = C.accent, BorderSizePixel = 0,
     }, track)
     corner(fill, 4)
     local hit = mk("TextButton", {
-        Size = UDim2.new(1, -24, 0, 26), Position = UDim2.new(0, 12, 0, 27),
-        BackgroundTransparency = 1, Text = "",
+        Size = UDim2.new(1, -24, 0, 26), Position = UDim2.new(0, 12, 0, 27), BackgroundTransparency = 1, Text = "",
     }, r)
     local val, dragging = default, false
     local function upd(input)
@@ -1250,18 +1029,15 @@ local function addSlider(parent, label, min, max, default, cb)
     end))
     return { get = function() return val end }
 end
-
 local function addLabel(parent, text, color)
     local l = mk("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
-        Text = text, TextColor3 = color or C.dim,
-        Font = Enum.Font.GothamBold, TextSize = 10,
+        Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = text,
+        TextColor3 = color or C.dim, Font = Enum.Font.GothamBold, TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, parent)
     mk("UIPadding", { PaddingLeft = UDim.new(0, 6) }, l)
     return l
 end
-
 local function addOutput(parent, height)
     local sf = mk("ScrollingFrame", {
         Size = UDim2.new(1, 0, 0, height or 150), BackgroundColor3 = Color3.fromRGB(10,10,13),
@@ -1269,74 +1045,41 @@ local function addOutput(parent, height)
         CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
     }, parent)
     corner(sf, 9)
-    mk("UIPadding", {
-        PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
-        PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
-    }, sf)
-    local lbl = mk("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
-        Text = "diag output appears here",
-        TextColor3 = Color3.fromRGB(170,230,190),
-        Font = Enum.Font.Code, TextSize = 10,
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+        PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6) }, sf)
+    return mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Text = "diag output here",
+        TextColor3 = Color3.fromRGB(170,230,190), Font = Enum.Font.Code, TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y,
     }, sf)
-    return lbl
 end
 
 --===================== MAIN TAB ===================================
 local mainTab = pages.Main
-addLabel(mainTab, "SAFETY FIRST")
-
-addToggle(mainTab, "Anti-Cheat Bypass (hub-side)", true, function(v)
-    S.antiCheat = v
-    if v and S.acMode ~= "off" then startAntiCheatBypass() end
+addLabel(mainTab, "BYPASS  (already armed at boot)")
+addLabel(mainTab, "observeTag: " .. (obsHooked and "HOOKED" or "waiting..."), C.on)
+addLabel(mainTab, "kick hook : " .. (gv().VH_KICK and "ARMED" or "off"), C.on)
+addButton(mainTab, "SHOW DIAG + LOG TAIL (copy)", showDiag, C.accent)
+diagLabel = addOutput(mainTab, 170)
+addButton(mainTab, "COPY FULL LOG FILE", function()
+    local d = readfile and select(2, pcall(readfile, LOGF))
+    if diagLabel then diagLabel.Text = d or "no log file" end
+    pcall(function() if setclipboard then setclipboard(d or "") end end)
 end)
-
-addToggle(mainTab, "Swallow Kick (log + stay in game)", true, function(v) S.swallow = v end)
-addToggle(mainTab, "Rejoin On Kick (instead of swallowing)", false, function(v) S.rejoinOnKick = v end)
-
-addButton(mainTab, "DIAGNOSE + COPY", runDiagnose, C.accent)
-addButton(mainTab, "DEEP DUMP + COPY (send me this)", runDump, Color3.fromRGB(60,120,200))
-addButton(mainTab, "SHOW PERSISTED KICK LOG (all sessions)", function()
-    local txt = fsRead(KICKFILE)
-    if not txt or txt == "" then txt = "no kicks recorded yet" end
-    if diagLabel then diagLabel.Text = txt end
-    if statusLbl then statusLbl.Text = "kicks this session: " .. kickCount end
-    pcall(function() if setclipboard then setclipboard(txt) end end)
+addButton(mainTab, "Re-arm observeTag now", function()
+    if not obsHooked then armObserveTag() end
+    if statusLbl then statusLbl.Text = "obsHooked = " .. tostring(obsHooked) end
 end)
-diagLabel = addOutput(mainTab, 150)
-
-addButton(mainTab, "PANIC - turn everything off", function()
-    S.autoSteal, S.autoCollect, S.autoRebirth, S.instantPrompts, S.autoLock = false, false, false, false, false
-    S.espBrainrots, S.espPlayers, S.noclip, S.fly, S.infJump, S.lockSpeed, S.gearAim = false, false, false, false, false, false, false
-    stopFly(); clearBrainrotESP(); clearPlayerESP()
-    if statusLbl then statusLbl.Text = "panic: all features off" end
-end, Color3.fromRGB(200,120,40))
 
 addLabel(mainTab, "AUTOMATION")
-addToggle(mainTab, "Auto Lock Base (clicks Lock button)", false, function(v)
-    S.autoLock = v
-    if v then startAutoLock() end
-end)
-addSlider(mainTab, "Lock Re-click Interval (sec)", 10, 120, 45, function(v) S.lockEvery = v end)
-
-addToggle(mainTab, "Auto Collect (sweeps your base)", false, function(v)
-    S.autoCollect = v
-    if v then startAutoCollect() end
-end)
-addToggle(mainTab, "Instant Prompts (HoldDuration=0 - can trip checks)", false, function(v)
-    S.instantPrompts = v
-    if v then startInstantPrompts() end
-end)
-addToggle(mainTab, "Auto Rebirth", false, function(v)
-    S.autoRebirth = v
-    if v then startAutoRebirth() end
-end)
-
+addToggle(mainTab, "Auto Steal", false, function(v) S.autoSteal = v; if v then startAutoSteal() end end)
+addToggle(mainTab, "Auto Lock Base", false, function(v) S.autoLock = v; if v then startAutoLock() end end)
+addToggle(mainTab, "Auto Collect", false, function(v) S.autoCollect = v; if v then startAutoCollect() end end)
+addToggle(mainTab, "Instant Prompts", false, function(v) S.instantPrompts = v; if v then startInstantPrompts() end end)
+addToggle(mainTab, "Auto Rebirth", false, function(v) S.autoRebirth = v; if v then startAutoRebirth() end end)
 addButton(mainTab, "Teleport to My Base", function()
-    local d = getBaseDrop()
-    if d then tpTo(d, 4) end
+    local d = getBaseDrop(); if d then tpTo(d, 4) end
 end)
 
 addLabel(mainTab, "SERVER")
@@ -1345,112 +1088,49 @@ addButton(mainTab, "Hop - Fewest Players", function() doHop({ auto = false, trie
 
 --===================== STEAL TAB ==================================
 local stealTab = pages.Steal
-addLabel(stealTab, "AUTO STEAL")
-addToggle(stealTab, "Auto Steal", false, function(v)
-    S.autoSteal = v
-    if v then startAutoSteal() end
-end)
-
-addLabel(stealTab, "PROMPT MODE")
-addToggle(stealTab, "Legit Prompt (HoldBegin/HoldEnd) - safe", true, function(v) S.legitPrompt = v end)
-
-addLabel(stealTab, "TIMING  (raise these if steals do nothing)")
-addSlider(stealTab, "Settle Time x100 (sec)", 5, 120, 35, function(v) S.settleTime = v / 100 end)
-addSlider(stealTab, "Extra Hold Time x100 (sec)", 0, 150, 15, function(v) S.holdTime = v / 100 end)
-addSlider(stealTab, "Cooldown x100 (sec)", 5, 100, 20, function(v) S.stealDelay = v / 100 end)
-addSlider(stealTab, "Same-prompt Fire Cooldown x100", 30, 300, 90, function(v) S.fireCooldown = v / 100 end)
-
-addLabel(stealTab, "OPTIONS")
-addToggle(stealTab, "Verify Steal + Retry Once", true, function(v) S.verify = v; S.retryOnce = v end)
-addToggle(stealTab, "Safe TP (anchor before warp)", true, function(v) S.safeTP = v end)
+addLabel(stealTab, "STEAL OPTIONS")
+addToggle(stealTab, "Legit Prompt (HoldBegin/HoldEnd)", true, function(v) S.legitPrompt = v end)
+addToggle(stealTab, "Verify Steal + Retry", true, function(v) S.verify = v; S.retryOnce = v end)
+addToggle(stealTab, "Safe TP", true, function(v) S.safeTP = v end)
 addToggle(stealTab, "Return to Base After Steal", true, function(v) S.returnToBase = v end)
-addToggle(stealTab, "Warp to Base Drop (not last pos)", true, function(v) S.baseReturn = v end)
-addToggle(stealTab, "Require Body on Podium (skip phantoms)", true, function(v) S.requireBody = v end)
-addToggle(stealTab, "TP Only - no prompt", false, function(v) S.tpOnly = v end)
+addToggle(stealTab, "Require Body on Podium", true, function(v) S.requireBody = v end)
 addToggle(stealTab, "Target Richest First", true, function(v) S.richestFirst = v end)
+addSlider(stealTab, "Settle Time x100", 5, 120, 35, function(v) S.settleTime = v / 100 end)
+addSlider(stealTab, "Cooldown x100", 5, 100, 20, function(v) S.stealDelay = v / 100 end)
 addSlider(stealTab, "Min Value (millions)", 0, 500, 0, function(v) S.minValue = v end)
-
 addButton(stealTab, "Steal Richest Now", function() doSteal(scanTargets(false)[1]) end, C.accent)
-
-addLabel(stealTab, "TOP BRAINROTS")
-local listFrame = mk("ScrollingFrame", {
-    Size = UDim2.new(1, 0, 0, 152), BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
-    CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-}, stealTab)
-mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
-
-local function refreshList()
-    if not listFrame or not listFrame.Parent then return end
-    for _, c in ipairs(listFrame:GetChildren()) do
-        if c:IsA("Frame") then c:Destroy() end
-    end
-    local list = scanTargets(false)
-    for i = 1, math.min(8, #list) do
-        local t = list[i]
-        local r = mk("Frame", {
-            Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.row,
-            BorderSizePixel = 0, LayoutOrder = i,
-        }, listFrame)
-        corner(r, 8)
-        mk("TextLabel", {
-            Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0),
-            BackgroundTransparency = 1,
-            Text = string.format("%d. %s  $%d", i, t.name, math.floor(t.value)),
-            TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-        }, r)
-        local tp = mk("TextButton", {
-            Size = UDim2.new(0, 52, 0, 22), Position = UDim2.new(1, -58, 0.5, -11),
-            BackgroundColor3 = C.accent, Text = "TP", TextColor3 = Color3.new(1,1,1),
-            Font = Enum.Font.GothamBold, TextSize = 11, BorderSizePixel = 0,
-        }, r)
-        corner(tp, 7)
-        tp.MouseButton1Click:Connect(function() tpTo(t.pos, 2) end)
-    end
-end
 
 --===================== SCAN TAB ===================================
 local scanTab = pages.Scan
-addLabel(scanTab, "SERVER CONTENT SCANNER")
+addLabel(scanTab, "SERVER SCANNER")
 addButton(scanTab, "SCAN THIS SERVER + COPY", function()
     local best, list = bestInServer()
-    local L = { "=== SERVER SCAN " .. os.date("%H:%M:%S") .. " job=" .. tostring(game.JobId) .. " ===" }
-    table.insert(L, "targets=" .. #list .. "  best=" .. (best and (best.name .. " $" .. math.floor(best.value)) or "none"))
+    local L = { "job=" .. tostring(game.JobId) .. " targets=" .. #list }
     for i = 1, math.min(15, #list) do
         table.insert(L, string.format("%2d. %-28s $%d", i, list[i].name, math.floor(list[i].value)))
     end
     local txt = table.concat(L, "\n")
     if diagLabel then diagLabel.Text = txt end
-    if statusLbl then statusLbl.Text = "scan: " .. #list .. " targets, best $" .. (best and math.floor(best.value) or 0) end
     pcall(function() if setclipboard then setclipboard(txt) end end)
 end, C.accent)
-
-addLabel(scanTab, "HOP UNTIL A SERVER BEATS YOUR TARGET VALUE")
 addSlider(scanTab, "Target Value (millions)", 0, 5000, 300, function(v) S.scanTarget = v end)
-addButton(scanTab, "START AUTO HOP (re-runs itself)", function()
+addButton(scanTab, "START AUTO HOP UNTIL TARGET", function()
     doHop({ auto = true, tries = 0, target = S.scanTarget, visited = {} })
 end, Color3.fromRGB(60,180,120))
-addButton(scanTab, "STOP AUTO HOP (stay here)", function()
-    saveHop(nil)
-    if statusLbl then statusLbl.Text = "auto hop stopped" end
-end, Color3.fromRGB(180,50,60))
-addButton(scanTab, "HOP NEXT - Fewest Players", function() doHop({ auto = false, tries = 0, visited = {} }) end)
+addButton(scanTab, "STOP AUTO HOP", function() saveHop(nil) end, Color3.fromRGB(180,50,60))
 
 --===================== GEAR TAB ===================================
 local gearTab = pages.Gear
-addLabel(gearTab, "GEAR AIM / AUTO SWING")
-addToggle(gearTab, "Gear Aim (locks you onto nearest player)", false, function(v) S.gearAim = v end)
-addToggle(gearTab, "Auto Swing when in range", false, function(v) S.gearAutoFire = v end)
+addLabel(gearTab, "GEAR AIM")
+addToggle(gearTab, "Gear Aim", false, function(v) S.gearAim = v end)
+addToggle(gearTab, "Auto Swing", false, function(v) S.gearAutoFire = v end)
 addSlider(gearTab, "Range (studs)", 10, 200, 60, function(v) S.gearRange = v end)
 addSlider(gearTab, "Swing Cooldown x100", 10, 200, 45, function(v) S.gearFireCd = v / 100 end)
-addSlider(gearTab, "Aim Smoothness x100", 5, 100, 30, function(v) S.gearSmooth = v / 100 end)
 addLabel(gearTab, "filter: " .. S.gearNames, C.dim)
 
---===================== VISUALS TAB ================================
+--===================== VIS TAB ====================================
 local visTab = pages.Vis
-addLabel(visTab, "ESP  (client-side, undetectable)")
-addToggle(visTab, "ESP Brainrots (name + value)", false, function(v)
+addToggle(visTab, "ESP Brainrots", false, function(v)
     S.espBrainrots = v
     if v then refreshBrainrotESP() else clearBrainrotESP() end
 end)
@@ -1458,29 +1138,15 @@ addToggle(visTab, "ESP Players", false, function(v)
     S.espPlayers = v
     if v then buildPlayerESP() else clearPlayerESP() end
 end)
-
-addLabel(visTab, "LIGHTING  (client-side, undetectable)")
 addToggle(visTab, "Fullbright", false, function(v)
-    S.fullbright = v
-    if v then
-        Lighting.Brightness = 3; Lighting.ClockTime = 14
-        Lighting.GlobalShadows = false
-        Lighting.Ambient = Color3.fromRGB(180,180,180)
-        Lighting.OutdoorAmbient = Color3.fromRGB(180,180,180)
-    else
-        Lighting.Brightness = 2; Lighting.GlobalShadows = true
-        Lighting.Ambient = Color3.fromRGB(70,70,70)
-        Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
-    end
-end)
-addToggle(visTab, "No Fog", false, function(v)
-    S.noFog = v
-    Lighting.FogEnd = v and 1e6 or 100000
+    Lighting.Brightness = v and 3 or 2
+    Lighting.GlobalShadows = not v
+    Lighting.Ambient = v and Color3.fromRGB(180,180,180) or Color3.fromRGB(70,70,70)
+    Lighting.OutdoorAmbient = v and Color3.fromRGB(180,180,180) or Color3.fromRGB(128,128,128)
 end)
 
 --===================== PLAYER TAB =================================
 local plrTab = pages.Player
-addLabel(plrTab, "CHARACTER")
 addSlider(plrTab, "WalkSpeed", 16, 200, 20, function(v)
     S.walkSpeed = v
     local h = getHum(); if h then h.WalkSpeed = v end
@@ -1489,95 +1155,32 @@ addSlider(plrTab, "JumpPower", 50, 250, 50, function(v)
     S.jumpPower = v
     local h = getHum(); if h then h.JumpPower = v; h.UseJumpPower = true end
 end)
-addToggle(plrTab, "Lock WalkSpeed", false, function(v) S.lockSpeed = v end)
 addToggle(plrTab, "Infinite Jump", false, function(v) S.infJump = v end)
 addToggle(plrTab, "Noclip", false, function(v) S.noclip = v end)
-
-addLabel(plrTab, "FLY  (turn off while auto-stealing)")
 addToggle(plrTab, "Fly", false, function(v)
     S.fly = v
     if v then startFly() else stopFly(); flyUpDir = 0 end
 end)
 addSlider(plrTab, "Fly Speed", 20, 300, 55, function(v) S.flySpeed = v end)
 
-local upDown = mk("Frame", { Size = UDim2.new(1,0,0,38), BackgroundTransparency = 1 }, plrTab)
-local function flyBtn(txt, x, dir)
-    local b = mk("TextButton", {
-        Size = UDim2.new(0.48, 0, 1, 0), Position = UDim2.new(x, 0, 0, 0),
-        BackgroundColor3 = C.row, Text = txt, TextColor3 = C.text,
-        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
-    }, upDown)
-    corner(b, 9)
-    b.MouseButton1Down:Connect(function() flyUpDir = dir end)
-    b.MouseButton1Up:Connect(function() flyUpDir = 0 end)
-    b.MouseLeave:Connect(function() flyUpDir = 0 end)
-end
-flyBtn("FLY UP", 0, 1)
-flyBtn("FLY DOWN", 0.52, -1)
-
-addLabel(plrTab, "TELEPORT TO PLAYER")
-local plrList = mk("ScrollingFrame", {
-    Size = UDim2.new(1, 0, 0, 132), BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
-    CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-}, plrTab)
-mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plrList)
-
-local function refreshPlayerList()
-    for _, c in ipairs(plrList:GetChildren()) do
-        if c:IsA("TextButton") then c:Destroy() end
-    end
-    local i = 0
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP then
-            i = i + 1
-            local b = mk("TextButton", {
-                Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.row,
-                Text = p.Name, TextColor3 = C.text, Font = Enum.Font.GothamMedium,
-                TextSize = 12, BorderSizePixel = 0, LayoutOrder = i,
-            }, plrList)
-            corner(b, 8)
-            b.MouseButton1Click:Connect(function()
-                local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then tpTo(hrp.Position, 4) end
-            end)
-        end
-    end
-end
-
 --===================== MISC TAB ===================================
 local miscTab = pages.Misc
-addLabel(miscTab, "ANTI-DETECTION")
-addButton(miscTab, "Cycle Bypass Mode: single / all / off", function()
-    S.acMode = (S.acMode == "single") and "all" or (S.acMode == "all") and "off" or "single"
-    acReset()
-    acScanOnce()
-    if statusLbl then statusLbl.Text = "acMode = " .. S.acMode .. " (hooked=" .. acHooked .. ")" end
-end)
-addButton(miscTab, "Re-scan now", function()
-    acReset()
-    acScanOnce()
-    if statusLbl then statusLbl.Text = "ac: hooked=" .. acHooked .. " scans=" .. acScans end
-end)
+addToggle(miscTab, "Swallow Kick", true, function(v) gv().VH_SWALLOW = v end)
 addToggle(miscTab, "Anti-AFK", true, function(v) S.antiAfk = v end)
-
-addLabel(miscTab, "UTILITY")
-addButton(miscTab, "Reset Character", function()
-    local c = getChar(); if c then c:BreakJoints() end
-end)
 addButton(miscTab, "Copy Job ID", function() if setclipboard then setclipboard(game.JobId) end end)
-addButton(miscTab, "Refresh Target List", refreshList, C.accent)
-addButton(miscTab, "Hide Panel", function() main.Visible = false end)
-addButton(miscTab, "Unload Script", function()
+addButton(miscTab, "Clear log file", function()
+    if writefile then pcall(writefile, LOGF, "") end
+    log("log cleared")
+end)
+addButton(miscTab, "Unload", function()
     gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
-    S.antiCheat, S.autoSteal, S.autoCollect, S.instantPrompts, S.autoRebirth, S.autoLock = false, false, false, false, false, false
     stopFly(); clearBrainrotESP(); clearPlayerESP()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    pcall(function() if espFolder then espFolder:Destroy() end end)
+    if espFolder then pcall(function() espFolder:Destroy() end) end
     if GUI then GUI:Destroy() end
 end, Color3.fromRGB(180,50,60))
 
---===================== DRAGGING ===================================
+--===================== DRAG =======================================
 local dragging, dragStart, startPos
 titleBar.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.Touch
@@ -1597,7 +1200,6 @@ bind(UIS.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.Touch
     or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 end))
-
 local minimized = false
 minBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
@@ -1613,86 +1215,52 @@ local floatBtn = mk("TextButton", {
     BackgroundColor3 = C.accent, Text = "VH", TextColor3 = Color3.new(1,1,1),
     Font = Enum.Font.GothamBold, TextSize = 15, BorderSizePixel = 0,
 }, GUI)
-corner(floatBtn, 24); stroke(floatBtn, Color3.fromRGB(160,130,255), 2, 0.2)
+corner(floatBtn, 24)
 floatBtn.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
     if main.Visible then main.Size = UDim2.new(0, W, 0, H) end
 end)
 
 --===================== LOOPS ======================================
-local espAcc, listAcc, plrAcc = 0, 0, 0
 bind(RunService.Heartbeat:Connect(function(dt)
     if not alive() then return end
-    if S.lockSpeed and not S.fly then
-        local h = getHum()
-        if h and math.abs(h.WalkSpeed - S.walkSpeed) > 0.5 then h.WalkSpeed = S.walkSpeed end
-    end
     pcall(gearTick, dt)
-    espAcc = espAcc + dt
-    listAcc = listAcc + dt
-    plrAcc = plrAcc + dt
-    if S.espBrainrots and espAcc >= 3 then espAcc = 0; task.spawn(refreshBrainrotESP) end
-    if listAcc >= 3 then listAcc = 0; task.spawn(refreshList) end
-    if plrAcc >= 5 then plrAcc = 0; task.spawn(refreshPlayerList) end
 end))
-
-local cashAcc = 0
-local function getCash()
-    local ls = LP:FindFirstChild("leaderstats")
-    if ls then
-        for _, v in ipairs(ls:GetChildren()) do
-            local n = v.Name:lower()
-            if v:IsA("ValueBase") and (n:find("cash") or n:find("money") or n:find("coin")) then return v.Value end
-        end
-        local first = ls:FindFirstChildWhichIsA("ValueBase")
-        if first then return first.Value end
-    end
-    return nil
-end
-bind(RunService.Heartbeat:Connect(function(dt)
-    if not alive() then return end
-    cashAcc = cashAcc + dt
-    if cashAcc < 0.5 then return end
-    cashAcc = 0
-    local c = getCash()
-    cashLbl.Text = c and ("$" .. tostring(c)) or ""
-end))
-
---===================== BOOT =======================================
-installKickHook()
-if S.antiCheat and S.acMode ~= "off" then startAntiCheatBypass() end
-
-bind(Players.PlayerRemoving:Connect(function(p)
-    if p == LP then noteKick("PlayerRemoving", "server removed us (no Kick signal)") end
-end))
-pcall(function()
-    LP.AncestryChanged:Connect(function(_, parent)
-        if not parent then noteKick("AncestryChanged", "LocalPlayer left the DataModel") end
-    end)
-end)
-
-task.spawn(refreshList)
-task.spawn(refreshPlayerList)
-task.delay(6, runDiagnose)
 
 task.spawn(function()
-    local st = loadHop()
-    if not st or not st.auto then return end
-    task.wait(15)
-    if not alive() then return end
-    local best = bestInServer()
-    if best and best.value >= (st.target or 0) then
-        saveHop(nil)
-        local msg = "FOUND " .. best.name .. " $" .. math.floor(best.value)
-        if statusLbl then statusLbl.Text = msg end
-        if diagLabel then diagLabel.Text = msg end
-        pcall(function() if setclipboard then setclipboard(msg) end end)
-        if S.autoSteal then startAutoSteal() end
-    else
-        doHop(st)
+    while alive() do
+        task.wait(3)
+        if S.espBrainrots then pcall(refreshBrainrotESP) end
+        if S.lockSpeed then
+            local h = getHum()
+            if h and math.abs(h.WalkSpeed - S.walkSpeed) > 0.5 then h.WalkSpeed = S.walkSpeed end
+        end
     end
 end)
 
-main.Visible = true
-if statusLbl then statusLbl.Text = "ready - " .. tostring(#getPlots()) .. " plots" end
-print("[VeniceHub] v2.4 loaded OK")
+--===================== BOOT =======================================
+task.spawn(function()
+    while alive() do
+        task.wait(15)
+        if not obsHooked then armObserveTag() end
+    end
+end)
+
+local st = loadHop()
+if st and st.auto then
+    task.spawn(function()
+        task.wait(15)
+        if not alive() then return end
+        local best = bestInServer()
+        if best and best.value >= (st.target or 0) then
+            saveHop(nil)
+            log("FOUND " .. best.name .. " $" .. math.floor(best.value))
+            if S.autoSteal then startAutoSteal() end
+        else
+            doHop(st)
+        end
+    end)
+end
+
+log("boot complete")
+if statusLbl then statusLbl.Text = "ready | obs=" .. tostring(obsHooked) .. " kick=" .. tostring(gv().VH_KICK == true) end
