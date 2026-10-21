@@ -1,6 +1,6 @@
 --[[=================================================================
   VENICE HUB  ::  STEAL A BRAINROT  ::  MOBILE ADMIN PANEL
-  v2.0  |  free  |  no key  |  stealth-tuned  |  crash-proof build
+  v2.1  |  settle-time fix + working collect + diagnostics
 =================================================================]]
 
 local Players           = game:GetService("Players")
@@ -23,9 +23,13 @@ local S = {
     autoRebirth    = false,
     richestFirst   = true,
     minValue       = 0,
-    stealDelay     = 0.50,
+    settleTime     = 0.40,
+    holdTime       = 0.55,
+    stealDelay     = 0.15,
     returnToBase   = true,
     safeTP         = true,
+    tpOnly         = false,
+    doubleFire     = true,
     espBrainrots   = false,
     espPlayers     = false,
     fullbright     = false,
@@ -48,28 +52,18 @@ local VALUE_KEYS = {
     cash=true, earnings=true, valuepersecond=true, multiplier=true, brainrotvalue=true,
 }
 
--- crash-proof instance builder: a bad property can never kill the build
 local function mk(class, props, parent)
     local ok, inst = pcall(Instance.new, class)
-    if not ok or not inst then
-        warn("[VeniceHub] bad class: " .. tostring(class))
-        return nil
-    end
+    if not ok or not inst then return nil end
     for k, v in pairs(props or {}) do
-        local good = pcall(function() inst[k] = v end)
-        if not good then warn("[VeniceHub] bad property: " .. tostring(k) .. " on " .. class) end
+        pcall(function() inst[k] = v end)
     end
     if parent then pcall(function() inst.Parent = parent end) end
     return inst
 end
-
-local function corner(o, r)
-    if o then mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o) end
-end
+local function corner(o, r) if o then mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o) end end
 local function stroke(o, c, t, tr)
-    if o then
-        mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o)
-    end
+    if o then mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o) end
 end
 
 local function parentGui()
@@ -92,7 +86,6 @@ local function getHum()
     return c and c:FindFirstChildOfClass("Humanoid")
 end
 
--- anchored = server sees a clean position change instead of a warp
 local function tpTo(pos, yOff, safe)
     local hrp = getHRP(); if not hrp then return end
     local target = CFrame.new(pos + Vector3.new(0, yOff or 4, 0))
@@ -100,28 +93,31 @@ local function tpTo(pos, yOff, safe)
     if safe then
         hrp.Anchored = true
         hrp.CFrame = target
-        task.wait(0.05)
+        task.wait(0.06)
         hrp.Anchored = false
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
     else
         hrp.CFrame = target
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-        pcall(function() hrp.Velocity = Vector3.zero end)
     end
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    pcall(function() hrp.Velocity = Vector3.zero end)
 end
 
+-- fixed: forces HoldDuration to 0 so the hold can never be cut short
 local function firePrompt(p)
-    if not p then return end
-    if p.Enabled == false then return end
+    if not p or p.Enabled == false then return end
     if fireproximityprompt then
-        pcall(fireproximityprompt, p)
-    else
-        pcall(function()
-            p:InputHoldBegin()
-            task.wait(math.min(p.HoldDuration or 0, 0.05))
-            p:InputHoldEnd()
-        end)
+        local ok = pcall(fireproximityprompt, p)
+        if ok then return end
     end
+    pcall(function()
+        local oldHold = p.HoldDuration
+        p.HoldDuration = 0
+        p:InputHoldBegin()
+        task.wait(0.06)
+        p:InputHoldEnd()
+        task.wait(0.03)
+        p.HoldDuration = oldHold
+    end)
 end
 
 local function getPlots()
@@ -241,6 +237,25 @@ local function scanTargets(includeMine)
     return out
 end
 
+--======================== CORE STEAL ROUTINE =======================
+local function doSteal(t)
+    local hrp = getHRP(); if not hrp or not t then return false end
+    local back = hrp.CFrame
+    tpTo(t.pos, 4)
+    task.wait(S.settleTime)          -- let the SERVER see our new position
+    if not S.tpOnly then
+        firePrompt(t.prompt)
+        if S.doubleFire then
+            task.wait(0.10)
+            firePrompt(t.prompt)
+        end
+    end
+    task.wait(S.holdTime)            -- let the steal actually process
+    if S.returnToBase then tpTo(back.Position, 0) end
+    task.wait(S.stealDelay)
+    return true
+end
+
 local espFolder = mk("Folder", { Name = "VeniceESP" }, Workspace)
 local brESP, plrESP = {}, {}
 local ESP_FILL = Color3.fromRGB(150, 110, 255)
@@ -269,9 +284,7 @@ local function makeBrainrotESP(model)
 end
 
 local function clearBrainrotESP()
-    for _, d in pairs(brESP) do
-        pcall(function() d.hl:Destroy(); d.bb:Destroy() end)
-    end
+    for _, d in pairs(brESP) do pcall(function() d.hl:Destroy(); d.bb:Destroy() end) end
     brESP = {}
 end
 
@@ -345,8 +358,6 @@ local flyBV, flyConn, flyUpDir = nil, nil, 0
 local function stopFly()
     if flyConn then flyConn:Disconnect(); flyConn = nil end
     if flyBV then flyBV:Destroy(); flyBV = nil end
-    local hrp = getHRP()
-    if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end) end
 end
 local function startFly()
     local hrp = getHRP(); if not hrp then return end
@@ -367,18 +378,9 @@ local function startAutoSteal()
             local ok, err = pcall(function()
                 local t = scanTargets(false)[1]
                 if t then
-                    local hrp = getHRP()
-                    if hrp then
-                        local back = hrp.CFrame
-                        tpTo(t.pos, 4)
-                        task.wait(0.12)
-                        firePrompt(t.prompt)
-                        task.wait(S.stealDelay)
-                        if S.returnToBase then tpTo(back.Position, 0) end
-                        task.wait(0.08)
-                    end
+                    doSteal(t)
                 else
-                    task.wait(0.40)
+                    task.wait(0.4)
                 end
             end)
             if not ok then warn("[VeniceHub] steal: " .. tostring(err)) end
@@ -388,7 +390,8 @@ local function startAutoSteal()
     end)
 end
 
-local collectThread
+-- rewritten: physically sweeps your own base so touch-pickups register
+local collectThread, collectIdx = nil, 0
 local function startAutoCollect()
     if collectThread then return end
     collectThread = task.spawn(function()
@@ -396,15 +399,26 @@ local function startAutoCollect()
             pcall(function()
                 local my = getMyPlot()
                 if my then
+                    local spots = {}
                     local podiums = my:FindFirstChild("AnimalPodiums")
                     if podiums then
                         for _, pod in ipairs(podiums:GetChildren()) do
-                            firePrompt(getPrompt(pod))
+                            local pos = getPos(pod)
+                            if pos then table.insert(spots, { pos = pos, pod = pod }) end
                         end
+                    end
+                    local hit = my:FindFirstChild("DeliveryHitbox", true)
+                    if hit then table.insert(spots, { pos = hit.Position }) end
+                    if #spots > 0 then
+                        collectIdx = (collectIdx % #spots) + 1
+                        local sp = spots[collectIdx]
+                        tpTo(sp.pos, 3)
+                        task.wait(0.14)
+                        if sp.pod then firePrompt(getPrompt(sp.pod)) end
                     end
                 end
             end)
-            task.wait(0.30)
+            task.wait(0.12)
         end
         collectThread = nil
     end)
@@ -439,9 +453,7 @@ local function startAutoRebirth()
                     for _, d in ipairs(pgui:GetDescendants()) do
                         if d:IsA("TextButton") and d.Visible and d.Active ~= false then
                             local t = d.Text:lower()
-                            if t:find("rebirth") or t:find("reborn") then
-                                d:Fire("MouseButton1Click")
-                            end
+                            if t:find("rebirth") or t:find("reborn") then d:Fire("MouseButton1Click") end
                         end
                     end
                 end
@@ -460,7 +472,6 @@ bind(LP.Idled:Connect(function()
     end)
 end))
 
---==================== anti-kick (optional, hook-based) ==============
 local antiKickOn = false
 local function setAntiKick(on)
     antiKickOn = on
@@ -479,17 +490,49 @@ local function setAntiKick(on)
     end)
 end
 
+--============================= DIAGNOSE ============================
+local function diagnose()
+    local lines = {}
+    local function out(s) table.insert(lines, s); print("[DIAG] " .. s) end
+    out("place=" .. tostring(game.PlaceId) .. " job=" .. tostring(game.JobId))
+    out("plots found = " .. tostring(#getPlots()))
+    local my = getMyPlot()
+    out("my plot = " .. (my and my:GetFullName() or "NOT FOUND"))
+    if my then
+        local pd = my:FindFirstChild("AnimalPodiums")
+        out("my podiums = " .. tostring(pd and #pd:GetChildren() or 0))
+        out("my children = " .. (function()
+            local n = {}
+            for _, c in ipairs(my:GetChildren()) do table.insert(n, c.Name .. "[" .. c.ClassName .. "]") end
+            return table.concat(n, ", ")
+        end)())
+    end
+    out("fireproximityprompt available = " .. tostring(fireproximityprompt ~= nil))
+
+    local targets = scanTargets(false)
+    out("stealable targets = " .. tostring(#targets))
+    local hrp = getHRP()
+    for i = 1, math.min(3, #targets) do
+        local t = targets[i]
+        local p = t.prompt
+        out(string.format("T%d path=%s", i, p:GetFullName()))
+        out(string.format("   dist=%s hold=%.2f maxDist=%.1f enabled=%s",
+            hrp and tostring(math.floor((t.pos - hrp.Position).Magnitude)) or "?",
+            p.HoldDuration, p.MaxActivationDistance, tostring(p.Enabled)))
+        out(string.format("   action=%q object=%q", p.ActionText, p.ObjectText))
+        local n = {}
+        for _, c in ipairs(t.pod:GetChildren()) do table.insert(n, c.Name .. "[" .. c.ClassName .. "]") end
+        out("   podium kids = " .. table.concat(n, ", "))
+    end
+    return lines
+end
+
 --============================== THEME ==============================
 local C = {
-    bg     = Color3.fromRGB(15, 15, 19),
-    panel  = Color3.fromRGB(23, 23, 29),
-    row    = Color3.fromRGB(33, 33, 42),
-    accent = Color3.fromRGB(126, 92, 255),
-    on     = Color3.fromRGB(0, 200, 140),
-    text   = Color3.fromRGB(236, 236, 246),
-    dim    = Color3.fromRGB(148, 148, 165),
-    off    = Color3.fromRGB(62, 62, 74),
-    bad    = Color3.fromRGB(230, 80, 80),
+    bg = Color3.fromRGB(15,15,19), panel = Color3.fromRGB(23,23,29),
+    row = Color3.fromRGB(33,33,42), accent = Color3.fromRGB(126,92,255),
+    on = Color3.fromRGB(0,200,140), text = Color3.fromRGB(236,236,246),
+    dim = Color3.fromRGB(148,148,165), off = Color3.fromRGB(62,62,74),
 }
 
 --============================= BUILD UI ============================
@@ -509,11 +552,10 @@ local W = math.clamp(math.floor(vp.X * 0.88), 260, 340)
 local H = math.clamp(math.floor(vp.Y * 0.62), 320, 460)
 
 local main = mk("Frame", {
-    Name = "Main", Size = UDim2.new(0, W, 0, H),
-    Position = UDim2.new(0.5, -math.floor(W/2), 0, 50),
+    Size = UDim2.new(0, W, 0, H), Position = UDim2.new(0.5, -math.floor(W/2), 0, 50),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Visible = true,
 }, GUI)
-corner(main, 14); stroke(main, Color3.fromRGB(80, 70, 130), 1.5, 0.35)
+corner(main, 14); stroke(main, Color3.fromRGB(80,70,130), 1.5, 0.35)
 
 local titleBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel, BorderSizePixel = 0,
@@ -522,7 +564,7 @@ corner(titleBar, 14)
 
 mk("TextLabel", {
     Size = UDim2.new(1, -120, 0, 18), Position = UDim2.new(0, 12, 0, 4),
-    BackgroundTransparency = 1, Text = "VENICE HUB  v2",
+    BackgroundTransparency = 1, Text = "VENICE HUB  v2.1",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, titleBar)
@@ -531,7 +573,7 @@ local statusLbl = mk("TextLabel", {
     Size = UDim2.new(1, -120, 0, 14), Position = UDim2.new(0, 12, 0, 22),
     BackgroundTransparency = 1, Text = "building...",
     TextColor3 = C.dim, Font = Enum.Font.GothamMedium, TextSize = 10,
-    TextXAlignment = Enum.TextXAlignment.Left,
+    TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 }, titleBar)
 
 local cashLbl = mk("TextLabel", {
@@ -549,7 +591,7 @@ corner(minBtn, 8)
 
 local closeBtn = mk("TextButton", {
     Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -34, 0, 6),
-    BackgroundColor3 = Color3.fromRGB(180, 50, 60), Text = "X", TextColor3 = Color3.new(1,1,1),
+    BackgroundColor3 = Color3.fromRGB(180,50,60), Text = "X", TextColor3 = Color3.new(1,1,1),
     Font = Enum.Font.GothamBold, TextSize = 13,
 }, titleBar)
 corner(closeBtn, 8)
@@ -561,16 +603,14 @@ local tabBar = mk("Frame", {
 corner(tabBar, 9)
 
 local tabScroll = mk("ScrollingFrame", {
-    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-    BorderSizePixel = 0, ScrollBarThickness = 0,
-    CanvasSize = UDim2.new(0, 0, 0, 0),
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 0, CanvasSize = UDim2.new(0,0,0,0),
     AutomaticCanvasSize = Enum.AutomaticSize.X,
     ScrollingDirection = Enum.ScrollingDirection.X,
 }, tabBar)
 mk("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center,
-    SortOrder = Enum.SortOrder.LayoutOrder,
+    FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
+    VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder,
 }, tabScroll)
 mk("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, tabScroll)
 
@@ -587,10 +627,8 @@ local function makePage(name)
         Name = name, Size = UDim2.new(1, 0, 1, 0),
         BackgroundTransparency = 1, BorderSizePixel = 0,
         ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        Visible = false,
-        ScrollingDirection = Enum.ScrollingDirection.Y,
+        CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        Visible = false, ScrollingDirection = Enum.ScrollingDirection.Y,
     }, content)
     mk("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, sf)
     mk("UIPadding", { PaddingBottom = UDim.new(0, 14) }, sf)
@@ -600,9 +638,7 @@ end
 
 local function selectTab(name)
     for n, p in pairs(pages) do p.Visible = (n == name) end
-    for n, b in pairs(tabBtns) do
-        b.BackgroundColor3 = (n == name) and C.accent or C.row
-    end
+    for n, b in pairs(tabBtns) do b.BackgroundColor3 = (n == name) and C.accent or C.row end
 end
 
 for i, name in ipairs(TABS) do
@@ -618,11 +654,9 @@ for i, name in ipairs(TABS) do
 end
 selectTab("Main")
 
---=========================== WIDGETS ===============================
 local function row(parent, h)
     local r = mk("Frame", {
-        Size = UDim2.new(1, 0, 0, h or 36), BackgroundColor3 = C.row,
-        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, h or 38), BackgroundColor3 = C.row, BorderSizePixel = 0,
     }, parent)
     corner(r, 9)
     return r
@@ -643,8 +677,7 @@ local function addToggle(parent, label, default, cb)
     }, r)
     corner(btn, 11)
     local knob = mk("Frame", {
-        Size = UDim2.new(0, 16, 0, 16), BorderSizePixel = 0,
-        BackgroundColor3 = Color3.new(1,1,1),
+        Size = UDim2.new(0, 16, 0, 16), BorderSizePixel = 0, BackgroundColor3 = Color3.new(1,1,1),
         Position = default and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 3, 0.5, -8),
     }, btn)
     corner(knob, 8)
@@ -694,7 +727,6 @@ local function addSlider(parent, label, min, max, default, cb)
         Size = UDim2.new(1, -24, 0, 26), Position = UDim2.new(0, 12, 0, 27),
         BackgroundTransparency = 1, Text = "",
     }, r)
-
     local val, dragging = default, false
     local function upd(input)
         local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
@@ -705,9 +737,7 @@ local function addSlider(parent, label, min, max, default, cb)
     end
     hit.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.Touch
-        or i.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true; upd(i)
-        end
+        or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; upd(i) end
     end)
     bind(UIS.InputChanged:Connect(function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.Touch
@@ -733,30 +763,31 @@ end
 
 --=========================== MAIN TAB ==============================
 local mainTab = pages.Main
-addLabel(mainTab, "STEALTH PRESET")
+addLabel(mainTab, "FIX FIRST")
 
-addButton(mainTab, "APPLY STEALTH MODE", function()
-    S.stealDelay = 0.60
-    S.safeTP = true
-    S.walkSpeed = 20
-    S.lockSpeed = true
-    S.fly = false
-    stopFly()
-    local h = getHum()
-    if h then h.WalkSpeed = 20 end
-    if statusLbl then statusLbl.Text = "stealth: delay 0.60 / anchored TP" end
+addButton(mainTab, "DIAGNOSE (prints to console)", function()
+    local lines = diagnose()
+    if statusLbl then statusLbl.Text = "diagnose done - see console" end
+end, C.accent)
+
+addButton(mainTab, "TEST: single steal + print", function()
+    local t = scanTargets(false)[1]
+    if not t then print("[DIAG] no target found"); return end
+    print("[DIAG] test steal -> " .. t.prompt:GetFullName())
+    doSteal(t)
+    print("[DIAG] test steal finished")
 end, C.accent)
 
 addLabel(mainTab, "AUTOMATION")
 
+addToggle(mainTab, "Auto Collect (sweeps your base)", false, function(v)
+    S.autoCollect = v
+    if v then startAutoCollect() end
+end)
+
 addToggle(mainTab, "Instant Prompts (client-side, safe)", false, function(v)
     S.instantPrompts = v
     if v then startInstantPrompts() end
-end)
-
-addToggle(mainTab, "Auto Collect (your base)", false, function(v)
-    S.autoCollect = v
-    if v then startAutoCollect() end
 end)
 
 addToggle(mainTab, "Auto Rebirth", false, function(v)
@@ -767,86 +798,72 @@ end)
 addButton(mainTab, "Teleport to My Base", function()
     local my = getMyPlot()
     if not my then return end
-    local hit = my:FindFirstChild("DeliveryHitbox", true)
-        or my:FindFirstChildWhichIsA("BasePart", true)
+    local hit = my:FindFirstChild("DeliveryHitbox", true) or my:FindFirstChildWhichIsA("BasePart", true)
     if hit then tpTo(hit.Position, 4) end
 end)
 
 addLabel(mainTab, "SERVER")
-addButton(mainTab, "Rejoin Server", function()
-    TeleportService:Teleport(game.PlaceId, LP)
-end)
+addButton(mainTab, "Rejoin Server", function() TeleportService:Teleport(game.PlaceId, LP) end)
 addButton(mainTab, "Hop - Smallest Server", function()
     local ok, res = pcall(function()
         return HttpService:JSONDecode(game:HttpGet(
-            "https://games.roblox.com/v1/games/" .. game.PlaceId ..
-            "/servers/Public?sortOrder=Asc&limit=100"))
+            "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
     end)
     if not ok or not res or not res.data then return end
     local best, bestN = nil, 1e9
     for _, s in ipairs(res.data) do
         if s.id ~= game.JobId and type(s.playing) == "number"
-        and s.playing < bestN and s.playing < s.maxPlayers then
-            best, bestN = s.id, s.playing
-        end
+        and s.playing < bestN and s.playing < s.maxPlayers then best, bestN = s.id, s.playing end
     end
     if best then TeleportService:TeleportToPlaceInstance(game.PlaceId, best, LP) end
 end)
-addButton(mainTab, "FPS Boost (low graphics)", function()
+addButton(mainTab, "FPS Boost", function()
     Lighting.GlobalShadows = false
     Lighting.FogEnd = 1e6
     for _, e in ipairs(Lighting:GetChildren()) do
         if e:IsA("PostEffect") then e.Enabled = false end
     end
-    pcall(function() Workspace.Terrain.WaterWaveSize = 0 end)
 end)
 
 --=========================== STEAL TAB =============================
 local stealTab = pages.Steal
 addLabel(stealTab, "AUTO STEAL")
 
-addToggle(stealTab, "Auto Steal (teleport loop)", false, function(v)
+addToggle(stealTab, "Auto Steal", false, function(v)
     S.autoSteal = v
     if v then startAutoSteal() end
 end)
 
-addToggle(stealTab, "Safe TP (anchor before warp)", true, function(v) S.safeTP = v end)
-addToggle(stealTab, "Target Richest First", true, function(v) S.richestFirst = v end)
-addToggle(stealTab, "Return to Base After Steal", true, function(v) S.returnToBase = v end)
+addLabel(stealTab, "TIMING  (raise these if steals do nothing)")
+addSlider(stealTab, "Settle Time x100 (sec)", 10, 120, 40, function(v) S.settleTime = v / 100 end)
+addSlider(stealTab, "Hold Time x100 (sec)", 10, 150, 55, function(v) S.holdTime = v / 100 end)
+addSlider(stealTab, "Cooldown x100 (sec)", 5, 100, 15, function(v) S.stealDelay = v / 100 end)
 
+addLabel(stealTab, "OPTIONS")
+addToggle(stealTab, "Double Fire Prompt", true, function(v) S.doubleFire = v end)
+addToggle(stealTab, "Safe TP (anchor before warp)", true, function(v) S.safeTP = v end)
+addToggle(stealTab, "Return to Base After Steal", true, function(v) S.returnToBase = v end)
+addToggle(stealTab, "TP Only - no prompt (test touch steal)", false, function(v) S.tpOnly = v end)
+addToggle(stealTab, "Target Richest First", true, function(v) S.richestFirst = v end)
 addSlider(stealTab, "Min Value (millions)", 0, 500, 0, function(v) S.minValue = v end)
-addSlider(stealTab, "Steal Delay x100 (sec)", 15, 150, 50, function(v) S.stealDelay = v / 100 end)
 
 addButton(stealTab, "Steal Richest Now", function()
-    local t = scanTargets(false)[1]
-    if not t then return end
-    local hrp = getHRP(); if not hrp then return end
-    local back = hrp.CFrame
-    tpTo(t.pos, 4); task.wait(0.14)
-    firePrompt(t.prompt); task.wait(S.stealDelay)
-    tpTo(back.Position, 0)
+    doSteal(scanTargets(false)[1])
 end, C.accent)
 
 addButton(stealTab, "Steal Nearest Now", function()
     local hrp = getHRP(); if not hrp then return end
     local here = hrp.Position
     local list = scanTargets(false)
-    table.sort(list, function(a, b)
-        return (a.pos - here).Magnitude < (b.pos - here).Magnitude
-    end)
-    local t = list[1]; if not t then return end
-    local back = hrp.CFrame
-    tpTo(t.pos, 4); task.wait(0.14)
-    firePrompt(t.prompt); task.wait(S.stealDelay)
-    tpTo(back.Position, 0)
+    table.sort(list, function(a, b) return (a.pos - here).Magnitude < (b.pos - here).Magnitude end)
+    doSteal(list[1])
 end)
 
-addLabel(stealTab, "TOP BRAINROTS ON SERVER")
+addLabel(stealTab, "TOP BRAINROTS")
 local listFrame = mk("ScrollingFrame", {
-    Size = UDim2.new(1, 0, 0, 152), BackgroundTransparency = 1,
-    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
-    CanvasSize = UDim2.new(0, 0, 0, 0),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    Size = UDim2.new(1, 0, 0, 152), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
+    CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
 }, stealTab)
 mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
 
@@ -865,8 +882,7 @@ local function refreshList()
         corner(r, 8)
         mk("TextLabel", {
             Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0),
-            BackgroundTransparency = 1,
-            Text = string.format("%d. %s", i, t.pod.Parent.Parent.Name),
+            BackgroundTransparency = 1, Text = string.format("%d. %s", i, t.pod.Parent.Parent.Name),
             TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
         }, r)
@@ -883,12 +899,10 @@ end
 --========================== VISUALS TAB ============================
 local visTab = pages.Visuals
 addLabel(visTab, "ESP  (client-side, undetectable)")
-
 addToggle(visTab, "ESP Brainrots (name + value)", false, function(v)
     S.espBrainrots = v
     if v then refreshBrainrotESP() else clearBrainrotESP() end
 end)
-
 addToggle(visTab, "ESP Players", false, function(v)
     S.espPlayers = v
     if v then buildPlayerESP() else clearPlayerESP() end
@@ -898,14 +912,12 @@ addLabel(visTab, "LIGHTING  (client-side, undetectable)")
 addToggle(visTab, "Fullbright", false, function(v)
     S.fullbright = v
     if v then
-        Lighting.Brightness = 3
-        Lighting.ClockTime = 14
+        Lighting.Brightness = 3; Lighting.ClockTime = 14
         Lighting.GlobalShadows = false
         Lighting.Ambient = Color3.fromRGB(180,180,180)
         Lighting.OutdoorAmbient = Color3.fromRGB(180,180,180)
     else
-        Lighting.Brightness = 2
-        Lighting.GlobalShadows = true
+        Lighting.Brightness = 2; Lighting.GlobalShadows = true
         Lighting.Ambient = Color3.fromRGB(70,70,70)
         Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
     end
@@ -918,7 +930,6 @@ end)
 --=========================== PLAYER TAB ============================
 local plrTab = pages.Player
 addLabel(plrTab, "CHARACTER  (server-visible)")
-
 addSlider(plrTab, "WalkSpeed", 16, 200, 20, function(v)
     S.walkSpeed = v
     local h = getHum(); if h then h.WalkSpeed = v end
@@ -927,7 +938,6 @@ addSlider(plrTab, "JumpPower", 50, 250, 50, function(v)
     S.jumpPower = v
     local h = getHum(); if h then h.JumpPower = v; h.UseJumpPower = true end
 end)
-
 addToggle(plrTab, "Lock WalkSpeed", false, function(v) S.lockSpeed = v end)
 addToggle(plrTab, "Infinite Jump", false, function(v) S.infJump = v end)
 addToggle(plrTab, "Noclip", false, function(v) S.noclip = v end)
@@ -956,10 +966,9 @@ flyBtn("FLY DOWN", 0.52, -1)
 
 addLabel(plrTab, "TELEPORT TO PLAYER")
 local plrList = mk("ScrollingFrame", {
-    Size = UDim2.new(1, 0, 0, 132), BackgroundTransparency = 1,
-    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
-    CanvasSize = UDim2.new(0, 0, 0, 0),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    Size = UDim2.new(1, 0, 0, 132), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
+    CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
 }, plrTab)
 mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plrList)
 
@@ -988,20 +997,14 @@ end
 --============================ MISC TAB =============================
 local miscTab = pages.Misc
 addLabel(miscTab, "ANTI-DETECTION")
-
-addToggle(miscTab, "Anti-Kick (rejoin on kick)", false, function(v)
-    setAntiKick(v)
-end)
-
+addToggle(miscTab, "Anti-Kick (rejoin on kick)", false, function(v) setAntiKick(v) end)
 addToggle(miscTab, "Anti-AFK", true, function(v) S.antiAfk = v end)
 
 addLabel(miscTab, "UTILITY")
 addButton(miscTab, "Reset Character", function()
     local c = getChar(); if c then c:BreakJoints() end
 end)
-addButton(miscTab, "Copy Job ID", function()
-    if setclipboard then setclipboard(game.JobId) end
-end)
+addButton(miscTab, "Copy Job ID", function() if setclipboard then setclipboard(game.JobId) end end)
 addButton(miscTab, "Refresh Target List", refreshList, C.accent)
 addButton(miscTab, "Hide Panel", function() main.Visible = false end)
 addButton(miscTab, "Unload Script", function()
@@ -1010,7 +1013,7 @@ addButton(miscTab, "Unload Script", function()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() espFolder:Destroy() end)
     GUI:Destroy()
-end, Color3.fromRGB(180, 50, 60))
+end, Color3.fromRGB(180,50,60))
 
 --============================ DRAGGING =============================
 local dragging, dragStart, startPos
@@ -1030,9 +1033,7 @@ bind(UIS.InputChanged:Connect(function(i)
 end))
 bind(UIS.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.Touch
-    or i.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = false
-    end
+    or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 end))
 
 local minimized = false
@@ -1063,19 +1064,10 @@ bind(RunService.Heartbeat:Connect(function(dt)
         local h = getHum()
         if h and math.abs(h.WalkSpeed - S.walkSpeed) > 0.5 then h.WalkSpeed = S.walkSpeed end
     end
-
     tickAcc = tickAcc + dt
-
-    if S.espBrainrots and tickAcc >= 2 then
-        task.spawn(refreshBrainrotESP)
-    end
-    if tickAcc >= 2.5 then
-        task.spawn(refreshList)
-    end
-    if tickAcc >= 5 then
-        tickAcc = 0
-        task.spawn(refreshPlayerList)
-    end
+    if S.espBrainrots and tickAcc >= 2 then task.spawn(refreshBrainrotESP) end
+    if tickAcc >= 2.5 then task.spawn(refreshList) end
+    if tickAcc >= 5 then tickAcc = 0; task.spawn(refreshPlayerList) end
 end))
 
 local cashAcc = 0
@@ -1097,7 +1089,6 @@ local function getCash()
     end
     return nil
 end
-
 bind(RunService.Heartbeat:Connect(function(dt)
     cashAcc = cashAcc + dt
     if cashAcc < 0.5 then return end
@@ -1108,9 +1099,6 @@ end))
 
 task.spawn(refreshList)
 task.spawn(refreshPlayerList)
-
 main.Visible = true
-if statusLbl then
-    statusLbl.Text = "ready - " .. tostring(#getPlots()) .. " plots"
-end
-print("[VeniceHub] v2.0 loaded OK")
+if statusLbl then statusLbl.Text = "ready - " .. tostring(#getPlots()) .. " plots" end
+print("[VeniceHub] v2.1 loaded OK")
