@@ -1,0 +1,1014 @@
+--[[=================================================================
+  VENICE HUB  ::  STEAL A BRAINROT  ::  MOBILE ADMIN PANEL
+  v1.1  |  free  |  no key  |  single file
+  ---------------------------------------------------------------
+  Host this file on GitHub, then load with:
+  loadstring(game:HttpGet("RAW_URL_HERE"))()
+=================================================================]]
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UIS               = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Lighting          = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace         = game:GetService("Workspace")
+local HttpService       = game:GetService("HttpService")
+local TeleportService   = game:GetService("TeleportService")
+local VirtualUser       = game:GetService("VirtualUser")
+
+local LP  = Players.LocalPlayer
+local CAM = Workspace.CurrentCamera
+
+local S = {
+    instantPrompts = false,
+    autoSteal      = false,
+    autoCollect    = false,
+    autoRebirth    = false,
+    richestFirst   = true,
+    minValue       = 0,
+    stealDelay     = 0.30,
+    returnToBase   = true,
+    espBrainrots   = false,
+    espPlayers     = false,
+    fullbright     = false,
+    noFog          = false,
+    infJump        = false,
+    noclip         = false,
+    fly            = false,
+    antiAfk        = false,
+    walkSpeed      = 16,
+    jumpPower      = 50,
+    flySpeed       = 60,
+}
+
+local conns = {}
+local function bind(c) table.insert(conns, c); return c end
+
+local VALUE_KEYS = {
+    value=true, price=true, cost=true, worth=true, income=true, money=true,
+    cash=true, earnings=true, valuepersecond=true, multiplier=true, brainrotvalue=true,
+}
+
+local function mk(class, props, parent)
+    local i = Instance.new(class)
+    for k, v in pairs(props or {}) do i[k] = v end
+    if parent then i.Parent = parent end
+    return i
+end
+local function corner(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o) end
+local function stroke(o, c, t, tr)
+    mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o)
+end
+
+local function parentGui()
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and h then return h end
+    end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then return cg end
+    return LP:WaitForChild("PlayerGui")
+end
+
+local function getChar() return LP.Character end
+local function getHRP()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function tpTo(pos, yOff)
+    local hrp = getHRP(); if not hrp then return end
+    hrp.CFrame = CFrame.new(pos + Vector3.new(0, yOff or 4, 0))
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    pcall(function() hrp.Velocity = Vector3.zero end)
+end
+
+local function firePrompt(p)
+    if not p then return end
+    if fireproximityprompt then
+        pcall(fireproximityprompt, p)
+    else
+        pcall(function()
+            p:InputHoldBegin()
+            task.wait(math.min(p.HoldDuration or 0, 0.05))
+            p:InputHoldEnd()
+        end)
+    end
+end
+
+local function getPlots()
+    local p = Workspace:FindFirstChild("Plots")
+    return p and p:GetChildren() or {}
+end
+
+local myPlotCache, myPlotTick = nil, 0
+local function isMyPlot(plot)
+    local yb = plot:FindFirstChild("YourBase", true)
+    if yb then
+        if yb:IsA("BoolValue") then
+            if yb.Value then return true end
+        elseif yb:IsA("GuiObject") or yb:IsA("Highlight") or yb:IsA("BillboardGui") then
+            if yb.Enabled then return true end
+        end
+    end
+    for _, a in ipairs({ "Owner", "Player", "UserId", "Plr", "Username" }) do
+        local v = plot:GetAttribute(a)
+        if v ~= nil and (v == LP.Name or v == LP.UserId or tostring(v) == tostring(LP.UserId)) then
+            return true
+        end
+    end
+    if plot.Name:find(LP.Name, 1, true) then return true end
+    local n = 0
+    for _, d in ipairs(plot:GetDescendants()) do
+        n = n + 1
+        if d:IsA("TextLabel") and d.Text == LP.Name then return true end
+        if n > 250 then break end
+    end
+    return false
+end
+
+local function getMyPlot()
+    if myPlotCache and myPlotCache.Parent and (os.clock() - myPlotTick) < 3 then
+        return myPlotCache
+    end
+    myPlotCache, myPlotTick = nil, os.clock()
+    for _, plot in ipairs(getPlots()) do
+        if isMyPlot(plot) then myPlotCache = plot; break end
+    end
+    return myPlotCache
+end
+
+local function findBrainrotModel(pod)
+    local base  = pod:FindFirstChild("Base")
+    local spawn = base and (base:FindFirstChild("Spawn") or base:FindFirstChild("SpawnPoint"))
+    local cont  = spawn or base or pod
+    for _, c in ipairs(cont:GetChildren()) do
+        if c:IsA("Model") then return c end
+    end
+    for _, c in ipairs(cont:GetChildren()) do
+        if c:IsA("BasePart") and c.Name ~= "PromptAttachment" then return c end
+    end
+    for _, c in ipairs(cont:GetChildren()) do
+        if c:IsA("Folder") then return c end
+    end
+    return nil
+end
+
+local function getPrompt(pod)
+    local base  = pod:FindFirstChild("Base")
+    local spawn = base and (base:FindFirstChild("Spawn") or base:FindFirstChild("SpawnPoint"))
+    local att   = spawn and spawn:FindFirstChild("PromptAttachment")
+    local p     = att and att:FindFirstChild("ProximityPrompt")
+    if p then return p end
+    return pod:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function getValue(inst)
+    for k, v in pairs(inst:GetAttributes()) do
+        if typeof(v) == "number" and VALUE_KEYS[k:lower()] then return v end
+    end
+    for _, c in ipairs(inst:GetChildren()) do
+        for k, v in pairs(c:GetAttributes()) do
+            if typeof(v) == "number" and VALUE_KEYS[k:lower()] then return v end
+        end
+    end
+    return 0
+end
+
+local function getPos(pod)
+    local m = findBrainrotModel(pod)
+    if m then
+        local bp = m:IsA("BasePart") and m or m:FindFirstChildWhichIsA("BasePart", true)
+        if bp then return bp.Position end
+    end
+    local bp = pod:FindFirstChildWhichIsA("BasePart", true)
+    return bp and bp.Position or nil
+end
+
+local function scanTargets(includeMine)
+    local my = getMyPlot()
+    local out = {}
+    for _, plot in ipairs(getPlots()) do
+        if includeMine or plot ~= my then
+            local podiums = plot:FindFirstChild("AnimalPodiums")
+            if podiums then
+                for _, pod in ipairs(podiums:GetChildren()) do
+                    local prompt = getPrompt(pod)
+                    if prompt then
+                        local val = getValue(pod)
+                        if val >= (S.minValue * 1e6) then
+                            local pos = getPos(pod)
+                            if pos then
+                                table.insert(out, { pod = pod, prompt = prompt, value = val, pos = pos })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if S.richestFirst then
+        table.sort(out, function(a, b) return a.value > b.value end)
+    end
+    return out
+end
+
+local espFolder = mk("Folder", { Name = "VeniceESP" }, Workspace)
+local brESP, plrESP = {}, {}
+local ESP_FILL = Color3.fromRGB(150, 110, 255)
+local ESP_GOOD = Color3.fromRGB(60, 230, 150)
+
+local function makeBrainrotESP(model)
+    if brESP[model] then return end
+    local part = model:IsA("BasePart") and model or model:FindFirstChildWhichIsA("BasePart", true)
+    if not part then return end
+    local hl = mk("Highlight", {
+        FillColor = ESP_FILL, OutlineColor = ESP_FILL,
+        FillTransparency = 0.65, OutlineTransparency = 0.15,
+        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+    }, model)
+    local bb = mk("BillboardGui", {
+        Size = UDim2.new(0, 130, 0, 34), StudsOffset = Vector3.new(0, 3, 0),
+        AlwaysOnTop = true, MaxDistance = 1000,
+    }, part)
+    local txt = mk("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+        Text = model.Name, TextColor3 = Color3.new(1,1,1),
+        Font = Enum.Font.GothamBold, TextSize = 12,
+        TextStrokeTransparency = 0.4, TextStrokeColor3 = Color3.new(0,0,0),
+    }, bb)
+    brESP[model] = { hl = hl, bb = bb, txt = txt }
+end
+
+local function clearBrainrotESP()
+    for _, d in pairs(brESP) do
+        pcall(function() d.hl:Destroy(); d.bb:Destroy() end)
+    end
+    brESP = {}
+end
+
+local function refreshBrainrotESP()
+    local live = {}
+    local my = getMyPlot()
+    for _, plot in ipairs(getPlots()) do
+        local podiums = plot:FindFirstChild("AnimalPodiums")
+        if podiums then
+            for _, pod in ipairs(podiums:GetChildren()) do
+                if getPrompt(pod) then
+                    local model = findBrainrotModel(pod)
+                    if model then
+                        live[model] = true
+                        makeBrainrotESP(model)
+                        local d = brESP[model]
+                        if d then
+                            local val = getValue(pod)
+                            local tag = (plot == my) and "MINE" or "STEAL"
+                            d.txt.Text = string.format("%s\n%s  %s", model.Name, tag,
+                                val > 0 and ("$" .. tostring(math.floor(val))) or "")
+                            d.txt.TextColor3 = (plot == my) and ESP_GOOD or Color3.new(1,1,1)
+                            d.hl.FillColor = (plot == my) and ESP_GOOD or ESP_FILL
+                            d.hl.OutlineColor = d.hl.FillColor
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for m, d in pairs(brESP) do
+        if not live[m] or not m.Parent then
+            pcall(function() d.hl:Destroy(); d.bb:Destroy() end)
+            brESP[m] = nil
+        end
+    end
+end
+
+local function buildPlayerESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character and not plrESP[p] then
+            plrESP[p] = mk("Highlight", {
+                FillColor = Color3.fromRGB(255,120,90),
+                OutlineColor = Color3.fromRGB(255,120,90),
+                FillTransparency = 0.7, OutlineTransparency = 0.1,
+                DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+            }, p.Character)
+        end
+    end
+end
+local function clearPlayerESP()
+    for _, hl in pairs(plrESP) do pcall(function() hl:Destroy() end) end
+    plrESP = {}
+end
+
+bind(RunService.Stepped:Connect(function()
+    if not S.noclip then return end
+    local c = getChar(); if not c then return end
+    for _, p in ipairs(c:GetDescendants()) do
+        if p:IsA("BasePart") then p.CanCollide = false end
+    end
+end))
+
+bind(UIS.JumpRequest:Connect(function()
+    if not S.infJump then return end
+    local hum = getHum()
+    if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end))
+
+local flyBV, flyConn, flyUpDir = nil, nil, 0
+local function stopFly()
+    if flyConn then flyConn:Disconnect(); flyConn = nil end
+    if flyBV then flyBV:Destroy(); flyBV = nil end
+end
+local function startFly()
+    local hrp = getHRP(); if not hrp then return end
+    flyBV = mk("BodyVelocity", { MaxForce = Vector3.new(1e5,1e5,1e5), P = 1e4, Parent = hrp })
+    flyConn = RunService.RenderStepped:Connect(function()
+        local h = getHRP(); local hum = getHum()
+        if not h or not flyBV then return end
+        local dir = hum and hum.MoveDirection or Vector3.zero
+        flyBV.Velocity = (dir * S.flySpeed) + Vector3.new(0, flyUpDir * S.flySpeed, 0)
+    end)
+end
+
+local stealThread
+local function startAutoSteal()
+    if stealThread then return end
+    stealThread = task.spawn(function()
+        while S.autoSteal do
+            local ok, err = pcall(function()
+                local t = scanTargets(false)[1]
+                if t then
+                    local hrp = getHRP()
+                    if hrp then
+                        local back = hrp.CFrame
+                        tpTo(t.pos, 4)
+                        task.wait(0.10)
+                        firePrompt(t.prompt)
+                        task.wait(S.stealDelay)
+                        if S.returnToBase then tpTo(back.Position, 0) end
+                    end
+                else
+                    task.wait(0.35)
+                end
+            end)
+            if not ok then warn("[VeniceHub] steal: " .. tostring(err)) end
+            task.wait(0.05)
+        end
+        stealThread = nil
+    end)
+end
+
+local collectThread
+local function startAutoCollect()
+    if collectThread then return end
+    collectThread = task.spawn(function()
+        while S.autoCollect do
+            pcall(function()
+                local my = getMyPlot()
+                if my then
+                    local podiums = my:FindFirstChild("AnimalPodiums")
+                    if podiums then
+                        for _, pod in ipairs(podiums:GetChildren()) do
+                            firePrompt(getPrompt(pod))
+                        end
+                    end
+                end
+            end)
+            task.wait(0.25)
+        end
+        collectThread = nil
+    end)
+end
+
+local instantThread
+local function startInstantPrompts()
+    if instantThread then return end
+    instantThread = task.spawn(function()
+        while S.instantPrompts do
+            pcall(function()
+                for _, p in ipairs(Workspace:GetDescendants()) do
+                    if p:IsA("ProximityPrompt") and p.HoldDuration ~= 0 then
+                        p.HoldDuration = 0
+                    end
+                end
+            end)
+            task.wait(1)
+        end
+        instantThread = nil
+    end)
+end
+
+local rebirthThread
+local function startAutoRebirth()
+    if rebirthThread then return end
+    rebirthThread = task.spawn(function()
+        while S.autoRebirth do
+            pcall(function()
+                local pg = LP:FindFirstChild("PlayerGui")
+                if pg then
+                    for _, d in ipairs(pg:GetDescendants()) do
+                        if d:IsA("TextButton") and d.Visible and d.Active ~= false then
+                            local t = d.Text:lower()
+                            if t:find("rebirth") or t:find("reborn") then
+                                d:Fire("MouseButton1Click")
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(1.5)
+        end
+        rebirthThread = nil
+    end)
+end
+
+bind(LP.Idled:Connect(function()
+    if not S.antiAfk then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
+local C = {
+    bg     = Color3.fromRGB(15, 15, 19),
+    panel  = Color3.fromRGB(23, 23, 29),
+    row    = Color3.fromRGB(33, 33, 42),
+    accent = Color3.fromRGB(126, 92, 255),
+    on     = Color3.fromRGB(0, 200, 140),
+    text   = Color3.fromRGB(236, 236, 246),
+    dim    = Color3.fromRGB(148, 148, 165),
+    off    = Color3.fromRGB(62, 62, 74),
+}
+
+local pg = parentGui()
+for _, parent in ipairs({ pg, LP:WaitForChild("PlayerGui") }) do
+    local old = parent and parent:FindFirstChild("VeniceHub_SAB")
+    if old then old:Destroy() end
+end
+
+local GUI = mk("ScreenGui", {
+    Name = "VeniceHub_SAB", ResetOnSpawn = false,
+    IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, pg)
+
+local vp = CAM.ViewportSize
+local W = math.clamp(math.floor(vp.X * 0.86), 250, 350)
+local H = math.clamp(math.floor(vp.Y * 0.60), 300, 470)
+
+local main = mk("Frame", {
+    Name = "Main", Size = UDim2.new(0, W, 0, H),
+    Position = UDim2.new(0.5, -W/2, 0, 60),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+}, GUI)
+corner(main, 14); stroke(main, Color3.fromRGB(80, 70, 130), 1.5, 0.35)
+
+local titleBar = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, main)
+corner(titleBar, 14)
+
+mk("TextLabel", {
+    Size = UDim2.new(1, -90, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1, Text = "VENICE HUB  //  ADMIN",
+    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+
+local cashLbl = mk("TextLabel", {
+    Size = UDim2.new(0, 60, 1, 0), Position = UDim2.new(1, -96, 0, 0),
+    BackgroundTransparency = 1, Text = "", TextColor3 = C.on,
+    Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right,
+}, titleBar)
+
+local minBtn = mk("TextButton", {
+    Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -62, 0, 6),
+    BackgroundColor3 = C.row, Text = "-", TextColor3 = C.text,
+    Font = Enum.Font.GothamBold, TextSize = 16,
+}, titleBar)
+corner(minBtn, 8)
+
+local closeBtn = mk("TextButton", {
+    Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -32, 0, 6),
+    BackgroundColor3 = Color3.fromRGB(180, 50, 60), Text = "X", TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold, TextSize = 13,
+}, titleBar)
+corner(closeBtn, 8)
+
+local tabBar = mk("Frame", {
+    Size = UDim2.new(1, -16, 0, 32), Position = UDim2.new(0, 8, 0, 44),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, main)
+corner(tabBar, 9)
+
+local tabScroll = mk("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ScrollBarThickness = 0,
+    CanvasSize = UDim2.new(0, 0, 0, 0), ScrollingDirection = Enum.ScrollingDirection.X,
+}, tabBar)
+mk("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, tabScroll)
+mk("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, tabScroll)
+
+local content = mk("Frame", {
+    Size = UDim2.new(1, -16, 1, -122), Position = UDim2.new(0, 8, 0, 82),
+    BackgroundTransparency = 1,
+}, main)
+
+local TABS = { "Main", "Steal", "Visuals", "Player", "Misc" }
+local pages, tabBtns = {}, {}
+
+local function makePage(name)
+    local sf = mk("ScrollingFrame", {
+        Name = name, Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 4, ScrollBarColor3 = C.accent,
+        CanvasSize = UDim2.new(0, 0, 0, 0), Visible = false,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, content)
+    mk("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, sf)
+    mk("UIPadding", { PaddingBottom = UDim.new(0, 12) }, sf)
+    pages[name] = sf
+    return sf
+end
+
+local function selectTab(name)
+    for n, p in pairs(pages) do p.Visible = (n == name) end
+    for n, b in pairs(tabBtns) do
+        b.BackgroundColor3 = (n == name) and C.accent or C.row
+    end
+end
+
+for i, name in ipairs(TABS) do
+    local b = mk("TextButton", {
+        Size = UDim2.new(0, 62, 0, 24), BackgroundColor3 = C.row,
+        Text = name, TextColor3 = C.text, Font = Enum.Font.GothamBold,
+        TextSize = 12, LayoutOrder = i, BorderSizePixel = 0,
+    }, tabScroll)
+    corner(b, 7)
+    tabBtns[name] = b
+    makePage(name)
+    b.MouseButton1Click:Connect(function() selectTab(name) end)
+end
+selectTab("Main")
+
+local function row(parent, h)
+    local r = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, h or 34), BackgroundColor3 = C.row,
+        BorderSizePixel = 0,
+    }, parent)
+    corner(r, 9)
+    return r
+end
+
+local function addToggle(parent, label, default, cb)
+    local r = row(parent, 36)
+    mk("TextLabel", {
+        Size = UDim2.new(1, -76, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Text = label, TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, r)
+    local btn = mk("TextButton", {
+        Size = UDim2.new(0, 48, 0, 22), Position = UDim2.new(1, -60, 0.5, -11),
+        BackgroundColor3 = default and C.on or C.off, Text = "", AutoButtonColor = false,
+        BorderSizePixel = 0,
+    }, r)
+    corner(btn, 11)
+    local knob = mk("Frame", {
+        Size = UDim2.new(0, 16, 0, 16), BorderSizePixel = 0,
+        BackgroundColor3 = Color3.new(1,1,1),
+        Position = default and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 3, 0.5, -8),
+    }, btn)
+    corner(knob, 8)
+    local state = default
+    local function set(v)
+        state = v
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = v and C.on or C.off }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.15), {
+            Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 3, 0.5, -8),
+        }):Play()
+        if cb then task.spawn(cb, v) end
+    end
+    btn.MouseButton1Click:Connect(function() set(not state) end)
+    return { set = set, get = function() return state end }
+end
+
+local function addButton(parent, label, cb, color)
+    local b = mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = color or C.row,
+        BorderSizePixel = 0, Text = label, TextColor3 = C.text,
+        Font = Enum.Font.GothamBold, TextSize = 13,
+    }, parent)
+    corner(b, 9)
+    b.MouseButton1Click:Connect(function() task.spawn(cb) end)
+    return b
+end
+
+local function addSlider(parent, label, min, max, default, cb)
+    local r = row(parent, 52)
+    local t = mk("TextLabel", {
+        Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 12, 0, 6),
+        BackgroundTransparency = 1, Text = label .. ": " .. tostring(default),
+        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, r)
+    local track = mk("Frame", {
+        Size = UDim2.new(1, -24, 0, 8), Position = UDim2.new(0, 12, 0, 34),
+        BackgroundColor3 = C.off, BorderSizePixel = 0,
+    }, r)
+    corner(track, 4)
+    local fill = mk("Frame", {
+        Size = UDim2.new((default - min) / (max - min), 0, 1, 0),
+        BackgroundColor3 = C.accent, BorderSizePixel = 0,
+    }, track)
+    corner(fill, 4)
+    local hit = mk("TextButton", {
+        Size = UDim2.new(1, -24, 0, 26), Position = UDim2.new(0, 12, 0, 25),
+        BackgroundTransparency = 1, Text = "",
+    }, r)
+
+    local val, dragging = default, false
+    local function upd(input)
+        local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+        val = math.floor(min + rel * (max - min) + 0.5)
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        t.Text = label .. ": " .. tostring(val)
+        if cb then task.spawn(cb, val) end
+    end
+    hit.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch
+        or i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true; upd(i)
+        end
+    end)
+    bind(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.Touch
+        or i.UserInputType == Enum.UserInputType.MouseMovement) then upd(i) end
+    end))
+    bind(UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch
+        or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end))
+    return { get = function() return val end }
+end
+
+local function addLabel(parent, text, color)
+    local l = mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+        Text = text, TextColor3 = color or C.dim,
+        Font = Enum.Font.GothamMedium, TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, parent)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 6) }, l)
+    return l
+end
+
+local mainTab = pages.Main
+addLabel(mainTab, "AUTOMATION")
+
+addToggle(mainTab, "Instant Prompts (0s hold)", false, function(v)
+    S.instantPrompts = v
+    if v then startInstantPrompts() end
+end)
+
+addToggle(mainTab, "Auto Collect (your base)", false, function(v)
+    S.autoCollect = v
+    if v then startAutoCollect() end
+end)
+
+addToggle(mainTab, "Auto Rebirth", false, function(v)
+    S.autoRebirth = v
+    if v then startAutoRebirth() end
+end)
+
+addButton(mainTab, "Teleport to My Base", function()
+    local my = getMyPlot()
+    if not my then return end
+    local hit = my:FindFirstChild("DeliveryHitbox", true)
+        or my:FindFirstChildWhichIsA("BasePart", true)
+    if hit then tpTo(hit.Position, 4) end
+end, C.accent)
+
+addLabel(mainTab, "SERVER")
+addButton(mainTab, "Rejoin Server", function()
+    TeleportService:Teleport(game.PlaceId, LP)
+end)
+addButton(mainTab, "Hop - Smallest Server", function()
+    local ok, res = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(
+            "https://games.roblox.com/v1/games/" .. game.PlaceId ..
+            "/servers/Public?sortOrder=Asc&limit=100"))
+    end)
+    if not ok or not res or not res.data then return end
+    local best, bestN = nil, 1e9
+    for _, s in ipairs(res.data) do
+        if s.id ~= game.JobId and type(s.playing) == "number"
+        and s.playing < bestN and s.playing < s.maxPlayers then
+            best, bestN = s.id, s.playing
+        end
+    end
+    if best then TeleportService:TeleportToPlaceInstance(game.PlaceId, best, LP) end
+end)
+addButton(mainTab, "FPS Boost (low graphics)", function()
+    Lighting.GlobalShadows = false
+    Lighting.FogEnd = 1e6
+    for _, e in ipairs(Lighting:GetChildren()) do
+        if e:IsA("PostEffect") then e.Enabled = false end
+    end
+    pcall(function() Workspace.Terrain.WaterWaveSize = 0 end)
+end)
+
+local stealTab = pages.Steal
+addLabel(stealTab, "AUTO STEAL")
+
+addToggle(stealTab, "Auto Steal (teleport loop)", false, function(v)
+    S.autoSteal = v
+    if v then startAutoSteal() end
+end)
+
+addToggle(stealTab, "Target Richest First", true, function(v) S.richestFirst = v end)
+addToggle(stealTab, "Return to Base After Steal", true, function(v) S.returnToBase = v end)
+
+addSlider(stealTab, "Min Value (millions)", 0, 500, 0, function(v) S.minValue = v end)
+addSlider(stealTab, "Steal Delay x100 (sec)", 5, 100, 30, function(v) S.stealDelay = v / 100 end)
+
+addButton(stealTab, "Steal Richest Now", function()
+    local t = scanTargets(false)[1]
+    if not t then return end
+    local hrp = getHRP(); if not hrp then return end
+    local back = hrp.CFrame
+    tpTo(t.pos, 4); task.wait(0.12)
+    firePrompt(t.prompt); task.wait(S.stealDelay)
+    tpTo(back.Position, 0)
+end, C.accent)
+
+addButton(stealTab, "Steal Nearest Now", function()
+    local hrp = getHRP(); if not hrp then return end
+    local my = hrp.Position
+    local list = scanTargets(false)
+    table.sort(list, function(a, b)
+        return (a.pos - my).Magnitude < (b.pos - my).Magnitude
+    end)
+    local t = list[1]; if not t then return end
+    local back = hrp.CFrame
+    tpTo(t.pos, 4); task.wait(0.12)
+    firePrompt(t.prompt); task.wait(S.stealDelay)
+    tpTo(back.Position, 0)
+end)
+
+addLabel(stealTab, "TOP BRAINROTS ON SERVER")
+local listFrame = mk("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 0, 150), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarColor3 = C.accent,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+}, stealTab)
+mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
+
+local function refreshList()
+    if not listFrame or not listFrame.Parent then return end
+    for _, c in ipairs(listFrame:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    local list = scanTargets(false)
+    for i = 1, math.min(6, #list) do
+        local t = list[i]
+        local r = mk("Frame", {
+            Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.row,
+            BorderSizePixel = 0, LayoutOrder = i,
+        }, listFrame)
+        corner(r, 8)
+        mk("TextLabel", {
+            Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1,
+            Text = string.format("%d. %s", i, t.pod.Parent.Parent.Name),
+            TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+        }, r)
+        local tp = mk("TextButton", {
+            Size = UDim2.new(0, 52, 0, 22), Position = UDim2.new(1, -58, 0.5, -11),
+            BackgroundColor3 = C.accent, Text = "TP", TextColor3 = Color3.new(1,1,1),
+            Font = Enum.Font.GothamBold, TextSize = 11, BorderSizePixel = 0,
+        }, r)
+        corner(tp, 7)
+        tp.MouseButton1Click:Connect(function() tpTo(t.pos, 4) end)
+    end
+end
+
+local visTab = pages.Visuals
+addLabel(visTab, "ESP")
+
+addToggle(visTab, "ESP Brainrots (name + value)", false, function(v)
+    S.espBrainrots = v
+    if v then refreshBrainrotESP() else clearBrainrotESP() end
+end)
+
+addToggle(visTab, "ESP Players", false, function(v)
+    S.espPlayers = v
+    if v then buildPlayerESP() else clearPlayerESP() end
+end)
+
+addLabel(visTab, "LIGHTING")
+addToggle(visTab, "Fullbright", false, function(v)
+    S.fullbright = v
+    if v then
+        Lighting.Brightness = 3
+        Lighting.ClockTime = 14
+        Lighting.GlobalShadows = false
+        Lighting.Ambient = Color3.fromRGB(180,180,180)
+        Lighting.OutdoorAmbient = Color3.fromRGB(180,180,180)
+    else
+        Lighting.Brightness = 2
+        Lighting.GlobalShadows = true
+        Lighting.Ambient = Color3.fromRGB(70,70,70)
+        Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
+    end
+end)
+addToggle(visTab, "No Fog", false, function(v)
+    S.noFog = v
+    Lighting.FogEnd = v and 1e6 or 100000
+end)
+
+local plrTab = pages.Player
+addLabel(plrTab, "CHARACTER")
+
+addSlider(plrTab, "WalkSpeed", 16, 250, 16, function(v)
+    S.walkSpeed = v
+    local h = getHum(); if h then h.WalkSpeed = v end
+end)
+addSlider(plrTab, "JumpPower", 50, 300, 50, function(v)
+    S.jumpPower = v
+    local h = getHum(); if h then h.JumpPower = v; h.UseJumpPower = true end
+end)
+
+addToggle(plrTab, "Infinite Jump", false, function(v) S.infJump = v end)
+addToggle(plrTab, "Noclip", false, function(v) S.noclip = v end)
+
+addLabel(plrTab, "FLY")
+addToggle(plrTab, "Fly", false, function(v)
+    S.fly = v
+    if v then startFly() else stopFly(); flyUpDir = 0 end
+end)
+addSlider(plrTab, "Fly Speed", 20, 300, 60, function(v) S.flySpeed = v end)
+
+local upDown = mk("Frame", { Size = UDim2.new(1,0,0,36), BackgroundTransparency = 1 }, plrTab)
+local function flyBtn(txt, x, dir)
+    local b = mk("TextButton", {
+        Size = UDim2.new(0.48, 0, 1, 0), Position = UDim2.new(x, 0, 0, 0),
+        BackgroundColor3 = C.row, Text = txt, TextColor3 = C.text,
+        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
+    }, upDown)
+    corner(b, 9)
+    b.MouseButton1Down:Connect(function() flyUpDir = dir end)
+    b.MouseButton1Up:Connect(function() flyUpDir = 0 end)
+    b.MouseLeave:Connect(function() flyUpDir = 0 end)
+end
+flyBtn("FLY UP", 0, 1)
+flyBtn("FLY DOWN", 0.52, -1)
+
+addLabel(plrTab, "TELEPORT TO PLAYER")
+local plrList = mk("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 0, 130), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarColor3 = C.accent,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+}, plrTab)
+mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plrList)
+
+local function refreshPlayerList()
+    for _, c in ipairs(plrList:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    local i = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            i = i + 1
+            local b = mk("TextButton", {
+                Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.row,
+                Text = p.Name, TextColor3 = C.text, Font = Enum.Font.GothamMedium,
+                TextSize = 12, BorderSizePixel = 0, LayoutOrder = i,
+            }, plrList)
+            corner(b, 8)
+            b.MouseButton1Click:Connect(function()
+                local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then tpTo(hrp.Position, 4) end
+            end)
+        end
+    end
+end
+
+local miscTab = pages.Misc
+addLabel(miscTab, "UTILITY")
+
+addToggle(miscTab, "Anti-AFK", false, function(v) S.antiAfk = v end)
+addButton(miscTab, "Reset Character", function()
+    local c = getChar(); if c then c:BreakJoints() end
+end)
+addButton(miscTab, "Copy Job ID", function()
+    if setclipboard then setclipboard(game.JobId) end
+end)
+addButton(miscTab, "Refresh Target List", refreshList, C.accent)
+addButton(miscTab, "Hide Panel", function() main.Visible = false end)
+addButton(miscTab, "Unload Script", function()
+    S.autoSteal, S.autoCollect, S.instantPrompts, S.autoRebirth = false, false, false, false
+    stopFly(); clearBrainrotESP(); clearPlayerESP()
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() espFolder:Destroy() end)
+    GUI:Destroy()
+end, Color3.fromRGB(180, 50, 60))
+
+local dragging, dragStart, startPos
+titleBar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch
+    or i.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging, dragStart, startPos = true, i.Position, main.Position
+    end
+end)
+bind(UIS.InputChanged:Connect(function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.Touch
+    or i.UserInputType == Enum.UserInputType.MouseMovement) then
+        local d = i.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                  startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end))
+bind(UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch
+    or i.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end))
+
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    main.Size = minimized and UDim2.new(0, W, 0, 38) or UDim2.new(0, W, 0, H)
+    minBtn.Text = minimized and "+" or "-"
+    tabBar.Visible = not minimized
+    content.Visible = not minimized
+end)
+closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
+
+local floatBtn = mk("TextButton", {
+    Size = UDim2.new(0, 46, 0, 46), Position = UDim2.new(0, 14, 0, 110),
+    BackgroundColor3 = C.accent, Text = "VH", TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold, TextSize = 15, BorderSizePixel = 0,
+}, GUI)
+corner(floatBtn, 23); stroke(floatBtn, Color3.fromRGB(160,130,255), 2, 0.2)
+floatBtn.MouseButton1Click:Connect(function() main.Visible = not main.Visible end)
+
+bind(RunService.Heartbeat:Connect(function()
+    if not S.fly then
+        local h = getHum()
+        if h and h.WalkSpeed ~= S.walkSpeed then h.WalkSpeed = S.walkSpeed end
+        if h and h.UseJumpPower and h.JumpPower ~= S.jumpPower then h.JumpPower = S.jumpPower end
+    end
+end))
+
+local espTick = 0
+bind(RunService.Heartbeat:Connect(function(dt)
+    if not S.espBrainrots then return end
+    espTick = espTick + dt
+    if espTick >= 2 then espTick = 0; task.spawn(refreshBrainrotESP) end
+end))
+
+local listTick, plrTick = 0, 0
+bind(RunService.Heartbeat:Connect(function(dt)
+    listTick = listTick + dt
+    if listTick >= 2.5 then listTick = 0; task.spawn(refreshList) end
+    plrTick = plrTick + dt
+    if plrTick >= 5 then plrTick = 0; task.spawn(refreshPlayerList) end
+end))
+
+local function getCash()
+    local ls = LP:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            local n = v.Name:lower()
+            if v:IsA("ValueBase") and (n:find("cash") or n:find("money") or n:find("coin")) then
+                return v.Value
+            end
+        end
+        local first = ls:FindFirstChildWhichIsA("ValueBase")
+        if first then return first.Value end
+    end
+    for _, a in ipairs({ "Cash", "Money", "Coins" }) do
+        local v = LP:GetAttribute(a)
+        if typeof(v) == "number" then return v end
+    end
+    return nil
+end
+
+bind(RunService.Heartbeat:Connect(function()
+    local c = getCash()
+    cashLbl.Text = c and ("$" .. tostring(c)) or ""
+end))
+
+refreshList()
+refreshPlayerList()
+print("[VeniceHub] v1.1 loaded - tap VH to open")
